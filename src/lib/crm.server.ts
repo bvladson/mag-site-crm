@@ -29,6 +29,7 @@ import {
   type CrmQuoteLinkPreview,
   type CrmTasksPage,
   type CrmContactSearchMatch,
+  type CrmInboxView,
 } from "./crm.ts";
 
 type Row = Record<string, any>;
@@ -189,6 +190,22 @@ const contactActivity = `MAX(c.updated_at,
   COALESCE((SELECT updated_at FROM crm_opportunities o WHERE o.contact_id=c.id ORDER BY updated_at DESC,id DESC LIMIT 1),c.updated_at))`;
 const contactAttention = `(EXISTS(SELECT 1 FROM crm_messages m WHERE m.contact_id=c.id AND m.sender='cliente' AND m.read_at IS NULL)
   OR EXISTS(SELECT 1 FROM crm_opportunities o WHERE o.contact_id=c.id AND o.awaiting_reply=1 AND o.stage NOT IN ('fechado','perdido')))`;
+/** Filtros rápidos do Atendimento (mesmas regras de `inboxViews` na tela). "retornos" usa $endOfToday. */
+const lastSender = `(SELECT m.sender FROM crm_messages m WHERE m.contact_id=c.id ORDER BY m.sent_at DESC,m.id DESC LIMIT 1)`;
+const needsReply = `(${contactAttention} OR ${lastSender}='cliente')`;
+export const CRM_INBOX_VIEWS = ["todas", "responder", "aguardando", "retornos", "proposta"] as const;
+const inboxViewSql: Record<CrmInboxView, string> = {
+  todas: "",
+  responder: needsReply,
+  aguardando: `(NOT ${needsReply} AND ${lastSender}='vendedora')`,
+  retornos: `EXISTS(SELECT 1 FROM crm_tasks t JOIN crm_opportunities o ON o.id=t.opportunity_id WHERE o.contact_id=c.id AND o.stage NOT IN ('fechado','perdido') AND t.status='pending' AND t.due<=$endOfToday)`,
+  proposta: `EXISTS(SELECT 1 FROM crm_quote_links l JOIN crm_opportunities o ON o.id=l.opportunity_id JOIN internal_quotes q ON q.id=l.quote_id WHERE o.contact_id=c.id AND o.stage NOT IN ('fechado','perdido') AND q.status<>'cancelado')`,
+};
+/** Fim do dia comercial (Fortaleza, UTC-3, sem horário de verão) em ISO UTC, para comparar com crm_tasks.due. */
+function endOfCommercialDay(now = new Date()) {
+  const day = new Date(now.getTime() - 3 * 3600_000).toISOString().slice(0, 10);
+  return new Date(`${day}T23:59:59.999-03:00`).toISOString();
+}
 function cursorHash(value: unknown) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 function readListCursor(raw: string | undefined, scope: string, ranked = false) {
   if (!raw) return null;
@@ -320,18 +337,34 @@ function registrationMatch(row: Row, query: string, rank: number): CrmContactSea
   for (const field of fields) if (tokens.every(token => fold(row[field]).includes(token))) return { kind: field };
   return { kind: "other" };
 }
-export interface CrmContactsPageInput { search?: string | undefined; searchMode?: "contacts" | "all" | undefined; before?: string | undefined; limit?: number | undefined; ownerId?: string | undefined; unitId?: string | undefined; attentionOnly?: boolean | undefined; }
+export interface CrmContactsPageInput { search?: string | undefined; searchMode?: "contacts" | "all" | undefined; before?: string | undefined; limit?: number | undefined; ownerId?: string | undefined; unitId?: string | undefined; attentionOnly?: boolean | undefined; view?: CrmInboxView | undefined; }
 export function listCrmContactsPage(actor: SiteUser, input: CrmContactsPageInput = {}): CrmContactsPage {
   actor = guard(actor);
   const db = ensureCrmSchema(), limit = listLimit(input.limit), search = text(input.search, 200);
   const searchMode = input.searchMode ?? "contacts";
   if (!["contacts", "all"].includes(searchMode)) throw new Error("Modo de busca inválido");
+  const view = input.view ?? "todas";
+  if (!(CRM_INBOX_VIEWS as readonly string[]).includes(view)) throw new Error("Filtro de atendimento inválido");
   if (!isAdmin(actor) && input.ownerId && input.ownerId !== actor.id) throw new Error("Forbidden: filtro de outra carteira");
   const ownerId = isAdmin(actor) ? input.ownerId || "" : actor.id;
   const conditions: string[] = [], args: Record<string, string | number> = {};
   if (ownerId) { conditions.push("c.owner_id=$owner"); args["owner"] = ownerId; }
   if (input.unitId) { conditions.push("c.unit_id=$unit"); args["unit"] = input.unitId; }
+  // Contagens dos filtros rápidos: só na primeira página sem busca, com a mesma carteira/unidade da lista.
+  const portfolio = [...conditions], portfolioArgs = { ...args, endOfToday: endOfCommercialDay() };
+  const viewCounts = !search && !input.before
+    ? Object.fromEntries(CRM_INBOX_VIEWS.map(item => {
+        const where = [...portfolio, inboxViewSql[item]].filter(Boolean);
+        const sql = `SELECT count(*) n FROM crm_contacts c ${where.length ? `WHERE ${where.join(" AND ")}` : ""}`;
+        const used = Object.fromEntries(Object.entries(portfolioArgs).filter(([key]) => sql.includes(`$${key}`)));
+        return [item, Number(db.prepare(sql).get(used)?.["n"])];
+      })) as Record<CrmInboxView, number>
+    : undefined;
   if (input.attentionOnly) conditions.push(contactAttention);
+  if (inboxViewSql[view]) {
+    conditions.push(inboxViewSql[view]);
+    if (view === "retornos") args["endOfToday"] = portfolioArgs.endOfToday;
+  }
   const rankExpression = "crm_contact_search_rank(c.name,c.company,c.phone,c.email,c.city,$query)";
   let ranked = "0", searchIndex: { ready: boolean } | undefined;
   const tokens = searchTokens(search);
@@ -353,7 +386,7 @@ export function listCrmContactsPage(actor: SiteUser, input: CrmContactsPageInput
     ranked = `CASE WHEN ${rankExpression}>0 THEN ${rankExpression} WHEN ${allTerms.join(" AND ")} THEN 40 ELSE 0 END`;
   }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-  const scope = cursorHash({ version: 2, actor: actor.id, ownerId, unitId: input.unitId || "", search: fold(search), searchMode, attentionOnly: Boolean(input.attentionOnly) });
+  const scope = cursorHash({ version: 2, actor: actor.id, ownerId, unitId: input.unitId || "", search: fold(search), searchMode, attentionOnly: Boolean(input.attentionOnly), ...(view === "todas" ? {} : { view }) });
   const cursor = readListCursor(input.before, scope, Boolean(search));
   const baseQuery = `SELECT c.*,${contactActivity} activity_at,${ranked} search_rank FROM crm_contacts c ${where}`;
   const filters = [search ? "search_rank>0" : "1"];
@@ -382,7 +415,7 @@ export function listCrmContactsPage(actor: SiteUser, input: CrmContactsPageInput
   const conversations = search ? summaries.map(summary => ({ ...summary, messages: summary.messages.map(message => ({ ...message, text: searchSnippet(message.text, search) })) })) : summaries;
   return { contacts: selected.map(contactFromRow), conversations, total: Number(db.prepare(`SELECT count(*) n FROM (${baseQuery}) ${search ? "WHERE search_rank>0" : ""}`).get(totalArgs)?.["n"]), hasMore,
     nextCursor: hasMore && oldest ? Buffer.from(JSON.stringify({ at: oldest["activity_at"], id: oldest["id"], rank: oldest["search_rank"], scope })).toString("base64url") : null,
-    ...(search ? { matches } : {}), ...(searchIndex ? { searchIndex } : {}) };
+    ...(search ? { matches } : {}), ...(searchIndex ? { searchIndex } : {}), ...(viewCounts ? { viewCounts } : {}) };
 }
 export function getCrmContactDetail(actor: SiteUser, id: string): CrmContactDetail {
   actor = guard(actor);

@@ -95,6 +95,8 @@ export interface Conversation {
   messages: Message[];
   channel: string;
 }
+/** Filtros rápidos do Atendimento: todas, não respondidas, aguardando cliente, retornos (hoje/atrasados), com proposta. */
+export type CrmInboxView = "todas" | "responder" | "aguardando" | "retornos" | "proposta";
 export interface CrmContactsPage {
   contacts: Contact[];
   conversations: Conversation[];
@@ -104,6 +106,8 @@ export interface CrmContactsPage {
   matches?: Record<string, CrmContactSearchMatch>;
   /** Older databases are indexed in bounded batches; never imply complete results before ready. */
   searchIndex?: { ready: boolean };
+  /** Contagem de cada filtro rápido na carteira (só na primeira página sem busca). */
+  viewCounts?: Record<CrmInboxView, number>;
 }
 export interface CrmContactSearchMatch {
   kind: "name" | "phone" | "email" | "company" | "conversation" | "opportunity" | "other";
