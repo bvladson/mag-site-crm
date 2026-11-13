@@ -89,17 +89,20 @@ function Problemas({ health }: { health: Health }) {
 
 function WhatsApp({ health }: { health: Health }) {
   const w = health.whatsapp;
+  const ativas = w ? w.linhas.filter((l) => l.ativa) : [];
+  const desativadas = w ? w.linhas.length - ativas.length : 0;
   return (
     <Card title="WhatsApp">
       {!w ? (
         <p className="text-sm text-muted-foreground">Nenhuma linha de WhatsApp cadastrada.</p>
       ) : (
         <>
-          <ul className="mb-3 divide-y text-sm">
-            {w.linhas.map((l) => (
-              <li key={`${l.vendedora}-${l.final}`} className="flex flex-wrap items-baseline justify-between gap-2 py-2">
+          {!ativas.length && <p className="mb-2 text-sm text-muted-foreground">Nenhuma linha ativa.</p>}
+          <ul className="mb-1 divide-y text-sm">
+            {ativas.map((l, i) => (
+              <li key={`${i}-${l.vendedora}-${l.final}`} className="flex flex-wrap items-baseline justify-between gap-2 py-2">
                 <span className="min-w-0 break-words">
-                  {l.vendedora} <span className="text-muted-foreground">· final {l.final || "?"}{l.ativa ? "" : " · desativada"}</span>
+                  {l.vendedora} <span className="text-muted-foreground">· final {l.final || "?"}</span>
                 </span>
                 <span className={l.estado === "WORKING" && !l.erro ? "text-success" : "font-semibold"}>
                   {l.estado === "WORKING" && !l.erro ? "Conectada" : maiuscula(estadoDaLinha(l.estado, l.erro))}
@@ -107,6 +110,9 @@ function WhatsApp({ health }: { health: Health }) {
               </li>
             ))}
           </ul>
+          {desativadas > 0 && (
+            <p className="mb-3 text-xs text-muted-foreground">{desativadas} linha(s) desativada(s) não aparecem aqui.</p>
+          )}
           <Rows
             rows={[
               ["Envios em andamento", String(w.fila.enviando)],
