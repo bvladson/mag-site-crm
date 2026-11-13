@@ -59,6 +59,15 @@ export async function authenticate(email: string, password: string): Promise<Sit
   return publicUser(row);
 }
 
+/**
+ * Login recusado vai para a auditoria (monitoramento de tentativas contra contas). Nunca guarda a senha nem o e-mail
+ * digitado: só a conta, quando ela existe.
+ */
+export function recordFailedLogin(email: string) {
+  const row = getDb().prepare('SELECT id FROM users WHERE email=? COLLATE NOCASE').get(email.trim().toLowerCase());
+  audit(null, 'auth:login:failed', row ? String(row['id']) : null, { conta: row ? 'existente' : 'inexistente' });
+}
+
 export const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
 
 export function createSession(userId: string, now = Date.now(), mfaVerified = false) {

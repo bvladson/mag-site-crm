@@ -7,10 +7,13 @@ export const login = createServerFn({ method: 'POST' })
     const { enforceRateLimit } = await import('./security.server');
     await enforceRateLimit('login-ip', 20, 900);
     await enforceRateLimit('login-account', 10, 900, data.email.toLowerCase());
-    const { authenticate } = await import('./local-auth-core.server');
+    const { authenticate, recordFailedLogin } = await import('./local-auth-core.server');
     const { startSession } = await import('./local-auth.server');
     const user = await authenticate(data.email, data.password);
-    if (!user || !user.roles.length) throw new Error('E-mail ou senha incorretos.');
+    if (!user || !user.roles.length) {
+      recordFailedLogin(data.email);
+      throw new Error('E-mail ou senha incorretos.');
+    }
     const { verifyMfaLogin } = await import('./mfa.server');
     if (!verifyMfaLogin(user, data.code)) return { ok: false as const, challenge: 'mfa' as const };
     startSession(user.id, true);

@@ -297,6 +297,11 @@ export function salvarOrcamento(u: SiteUser, id: string, d: DadosOrcamento, prod
         item.entrada.descontoValor, item.calculado.brutoCentavos, item.calculado.descontoCentavos, item.calculado.totalCentavos, item.calculado.precoAplicadoCentavos);
     });
     assertDiscountCeiling(id);
+    // Auditoria da edição (valores e descontos), sem dados do cliente: quem salvou, versão e totais.
+    audit(u.id, "quote:saved", id, {
+      versao: Number(q["version"]) + 1, itens: itens.length, total_cents: totais.totalCentavos, desconto_itens_cents: totais.descontoCentavos,
+      desconto_geral_cents: proposta ? proposta.descontoGeral : Number(q["general_discount_cents"] ?? 0),
+    });
     return { ok: true, versao: Number(q["version"]) + 1 };
   });
 }
