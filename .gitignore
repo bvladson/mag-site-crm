@@ -42,3 +42,5 @@ catalog-cache/
 
 # Saidas locais (nao vao para as releases)
 /reports/
+__pycache__/
+*.pyc
