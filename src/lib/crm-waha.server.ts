@@ -269,10 +269,18 @@ function migrateSingleNumber(db: ReturnType<typeof getDb>, config: WahaSettings)
     db.prepare(
       "INSERT INTO crm_waha_lines(id,user_id,session,expected_phone,status,revision,created_by,created_at,updated_at) VALUES(?,?,?,?,'active',1,NULL,?,?)",
     ).run(id, ownerId, session, phone(config.expectedPhone || ""), now(), now());
+    // A troca de versão deixa o site fora do ar por instantes e o WhatsApp segue conectado (nenhum aviso de "voltou").
+    // Sem isto, a primeira conferência só marcaria "agora" e o que chegou durante a troca dependeria de o WAHA reenviar.
+    // Com o ponto de partida 15 min para trás, a primeira conferência busca esse intervalo; o que a v1 já gravou não se
+    // repete (id canônico + UNIQUE(provider,account,external_id)).
+    const desde = Math.floor(Date.now() / 1000) - MIGRATION_LOOKBACK_S;
+    db.prepare("INSERT OR IGNORE INTO crm_waha_watermarks(session,baseline,covered_until,last_probe) VALUES(?,?,?,0)").run(session, desde, desde);
     audit(null, "crm:waha:line:migrated", id, { session });
   }
   migrated.add(db);
 }
+/** Quanto a primeira conferência depois da migração da v1 olha para trás (cobre a troca de versão). */
+const MIGRATION_LOOKBACK_S = 15 * 60;
 const lineOf = (row: Row | undefined): WahaLine | null =>
   row
     ? {
