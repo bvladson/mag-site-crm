@@ -1,13 +1,14 @@
 /**
  * Solicitações do site (pedidos de orçamento e contatos) no painel, com a MESMA regra de carteira do CRM.
  *
- * - Administrador vê tudo.
- * - Comercial vê o que é seu (atribuído a ele, convertido numa negociação dele ou importado numa oportunidade dele no
- *   CRM) e a fila livre (o que ainda não é de ninguém, para assumir). Nunca vê o que já é de outro vendedor — nem pela
- *   lista, nem pela busca, nem pelo resumo do painel, nem abrindo ou alterando pelo ID.
+ * - Administrador vê tudo, inclusive a TRIAGEM: o que ainda não tem responsável (decisão D1 da MAG, 13/11/2026 —
+ *   distribuição automática por unidade/rodízio; o que sobrar fica com o administrador para distribuir).
+ * - Comercial vê só o que é seu: atribuído a ele, convertido numa negociação dele ou trazido para uma oportunidade dele
+ *   no CRM. Nunca o de outro vendedor nem o que está na triagem — nem pela lista, nem pela busca, nem pelo resumo do
+ *   painel, nem abrindo ou alterando pelo ID.
  *
- * Usado pelas páginas Orçamentos do site, Contatos e Leads, pela busca geral e pelo resumo do painel. As regras de
- * conversão (criarOrcamento, importSiteLead) continuam onde estão e já respeitam o dono.
+ * Usado pelas páginas Orçamentos do site, Contatos e Leads, pela busca geral e pelo resumo do painel. A conversão em
+ * negociação (criarOrcamento) e a importação no CRM (importSiteLead) seguem a mesma regra.
  */
 import { decodeLead, getDb, readLead, updateLead } from "./local-db.server.ts";
 import { requireActiveUser, type SiteUser } from "./local-auth-core.server.ts";
@@ -22,33 +23,24 @@ const hasTable = (name: string) =>
 const commercial = (actor: SiteUser | null) => requireActiveUser(actor, ["admin", "comercial"]);
 
 /**
- * Cláusula SQL de visibilidade sobre o alias da tabela de solicitações. Para quem não é administrador:
- * (ligada a mim) OU NÃO (ligada a outra pessoa). "Ligada" = atribuição, negociação criada a partir dela ou oportunidade
- * do CRM importada dela. Tabelas que ainda não existem (bancos antigos) simplesmente não entram na regra.
+ * Cláusula SQL de visibilidade sobre o alias da tabela de solicitações. Para quem não é administrador: só o que está
+ * ligado a ele — atribuição, negociação criada a partir dela ou oportunidade do CRM trazida dela. Tabelas que ainda não
+ * existem (bancos antigos) simplesmente não entram na regra; sem nenhuma, o vendedor não vê nada (triagem).
  */
 export function siteLeadScope(actor: SiteUser, kind: SiteLeadKind, alias: string): { clause: string; params: string[] } {
   if (isAdmin(actor)) return { clause: "1=1", params: [] };
   const mine: string[] = [];
-  const other: string[] = [];
   if (kind === "quote") {
-    if (hasTable("lead_assignments")) {
+    if (hasTable("lead_assignments"))
       mine.push(`EXISTS(SELECT 1 FROM lead_assignments sa WHERE sa.lead_id=${alias}.id AND sa.owner_id=?)`);
-      other.push(`EXISTS(SELECT 1 FROM lead_assignments sa WHERE sa.lead_id=${alias}.id AND sa.owner_id IS NOT NULL AND sa.owner_id<>?)`);
-    }
     mine.push(`EXISTS(SELECT 1 FROM internal_quotes sn WHERE sn.source_request_id=${alias}.id AND sn.owner_id=?)`);
-    other.push(`EXISTS(SELECT 1 FROM internal_quotes sn WHERE sn.source_request_id=${alias}.id AND sn.owner_id<>?)`);
   }
   if (hasTable("crm_lead_links") && hasTable("crm_opportunities")) {
     const provider = kind === "quote" ? "site:quote" : "site:contact";
-    const link = `SELECT 1 FROM crm_lead_links sl JOIN crm_opportunities so ON so.id=sl.opportunity_id WHERE sl.provider='${provider}' AND sl.external_id=${alias}.id`;
-    mine.push(`EXISTS(${link} AND so.owner_id=?)`);
-    other.push(`EXISTS(${link} AND so.owner_id<>?)`);
+    mine.push(`EXISTS(SELECT 1 FROM crm_lead_links sl JOIN crm_opportunities so ON so.id=sl.opportunity_id WHERE sl.provider='${provider}' AND sl.external_id=${alias}.id AND so.owner_id=?)`);
   }
-  if (!mine.length) return { clause: "1=1", params: [] };
-  return {
-    clause: `((${mine.join(" OR ")}) OR NOT (${other.join(" OR ")}))`,
-    params: [...mine.map(() => actor.id), ...other.map(() => actor.id)],
-  };
+  if (!mine.length) return { clause: "0=1", params: [] };
+  return { clause: `(${mine.join(" OR ")})`, params: mine.map(() => actor.id) };
 }
 
 /** Confere sessão, perfil e carteira de uma solicitação; devolve o usuário conferido. */
@@ -58,7 +50,7 @@ export function requireSiteLead(actor: SiteUser | null, kind: SiteLeadKind, id: 
   if (!getDb().prepare(`SELECT 1 FROM ${table} WHERE id=?`).get(id)) throw new Error("Registro não encontrado");
   const scope = siteLeadScope(user, kind, "r");
   if (!getDb().prepare(`SELECT 1 FROM ${table} r WHERE r.id=? AND ${scope.clause}`).get(id, ...scope.params))
-    throw new Error("Forbidden: esta solicitação é de outra carteira");
+    throw new Error("Forbidden: esta solicitação é de outra carteira ou está na triagem do administrador");
   return user;
 }
 

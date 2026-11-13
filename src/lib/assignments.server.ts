@@ -272,8 +272,8 @@ export function readLeadAssignment(actor: SiteUser, leadId: string) {
     ...assignment,
     ownerName: (owner?.["display_name"] || owner?.["email"] || null) as string | null,
     unitName: unit?.name || null,
-    canConvert:
-      actor.roles.includes("admin") || !assignment.ownerId || assignment.ownerId === actor.id,
+    // Decisão D1: sem responsável = triagem do administrador; vendedor converte só o que é dele.
+    canConvert: actor.roles.includes("admin") || assignment.ownerId === actor.id,
     negotiations: linked.map((n) => ({
       id: String(n["id"]),
       number: String(n["number"]),

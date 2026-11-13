@@ -7,7 +7,7 @@ abre nada que não seja da carteira de quem pede.
 | Perfil | Vê e altera |
 | --- | --- |
 | Administrador | Tudo (supervisão). No WhatsApp, não responde por padrão. |
-| Comercial | A própria carteira, mais a fila livre de solicitações do site (o que ainda não é de ninguém). |
+| Comercial | Só a própria carteira. Solicitação do site sem responsável fica na triagem do administrador (decisão D1). |
 | Gerente | A fila de aprovação de descontos (nunca aprova o próprio). Não acessa CRM nem negociações. |
 | DHO | Vagas, candidaturas, entrevistas e currículos. Nada comercial. |
 
@@ -28,7 +28,7 @@ conferido pelo teste `tests/seguranca-inventario.test.mjs`.
 | Descontos | O dono pede e vê; gerente ou administrador decidem | `discounts.server.ts` | `discounts`, `seguranca-carteiras` |
 | Rascunho do catálogo (Atendimento) | Da oportunidade e do dono atual; se a oportunidade muda de mão, o rascunho antigo some; "Gerar orçamento" passa pelo motor da negociação | `crm-catalogo.server.ts` | `crm-catalogo` |
 | Pedidos do cliente (Ficha) | Só negociações da carteira; status lido do que já foi registrado | `crm-catalogo.server.ts` (`pedidosDoContato`) | `crm-catalogo` |
-| **Solicitações do site** (pedidos de orçamento e contatos) — **corrigido** | O que é seu (atribuído, convertido em negociação sua ou trazido para uma oportunidade sua) mais a fila livre. Nunca o que é de outro vendedor | `site-leads.server.ts`: listas, detalhe, status e notas, página Leads, busca geral e resumo do painel | `seguranca-carteiras` (falhava antes da correção) |
+| **Solicitações do site** (pedidos de orçamento e contatos) — **corrigido** | Só o que é seu (atribuído, convertido em negociação sua ou trazido para uma oportunidade sua). Sem responsável = triagem do administrador; a vendedora não abre, não converte e não importa pelo ID | `site-leads.server.ts` (listas, detalhe, status e notas, página Leads, busca geral, resumo); `criarOrcamento`; `importSiteLead` | `seguranca-carteiras` (falhava antes da correção) |
 | Busca geral do painel | CRM, negociações e solicitações dentro da carteira; candidaturas só para administrador e DHO | `panel.server.ts` | `seguranca-carteiras` |
 | Contagens e métricas comerciais | Escopo pessoal para o vendedor | `panelCountsCore`, `links-metrics.server.ts` | `seguranca-carteiras` |
 | Currículos | Administrador ou DHO, com auditoria de cada download | rota `api.interno.curriculo.$id` | inventário |
@@ -44,11 +44,13 @@ novo.
 
 ## Decisões por desenho (não são falhas)
 
-1. **Fila livre visível a todos os vendedores.** Pedidos sem responsável continuam visíveis para que alguém os assuma
-   (o fluxo atual de "converter em negociação"). Se a MAG preferir que só o administrador distribua, a troca é uma
-   linha em `siteLeadScope`.
-2. **Contatos do site sem dono** ("fale conosco") são fila comum do comercial. Quando entram no CRM, passam a ser do
-   dono da oportunidade e saem da vista dos outros.
+1. **Triagem do administrador (decisão D1 da MAG, 13/11/2026).** A distribuição preferida é automática, por unidade
+   com rodízio (página Atribuição de leads). O que ficar sem responsável vai para a triagem do administrador, que
+   distribui. A vendedora não vê, não converte e não importa lead sem responsável. Para abrir a triagem também a
+   gestores, é preciso definir o perfil (hoje "gerente" só aprova descontos) e dar a ele a atribuição de leads, com
+   teste.
+2. **Contatos do site sem dono** ("fale conosco") também ficam na triagem do administrador. Quando entram no CRM,
+   passam a ser do dono da oportunidade.
 3. **Pedido no Omie:** `gerarPedido` confere primeiro o código da revisão. Esse código é preso ao usuário e ao orçamento
    e só nasce depois da conferência de carteira. O código está congelado desde a homologação do Omie; a negação está
    provada no teste.

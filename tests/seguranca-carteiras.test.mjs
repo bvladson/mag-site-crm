@@ -94,9 +94,11 @@ function siteQuote(owner, suffix) {
 }
 const leadA = siteQuote(a, 1);
 const leadB = siteQuote(b, 2);
-const livre = siteQuote(null, 3);
-const livreConvertidoPelaB = siteQuote(null, 4);
-quotes.criarOrcamento(b, products, livreConvertidoPelaB); // B assumiu um pedido sem responsável
+const livre = siteQuote(null, 3); // triagem do administrador (decisão D1)
+// Caso antigo (antes da D1): a B converteu um pedido e depois ficou sem atribuição — continua da B pela negociação.
+const livreConvertidoPelaB = siteQuote(b, 4);
+quotes.criarOrcamento(b, products, livreConvertidoPelaB);
+db.getDb().prepare("DELETE FROM lead_assignments WHERE lead_id=?").run(livreConvertidoPelaB);
 const siteContact = (name) =>
   db.insertLead("contact_requests", { nome: name, empresa: "", email: "contato@example.invalid", whatsapp: "85999990000", assunto: "Dúvida", mensagem: "Mensagem artificial" }).id;
 const contatoLivre = siteContact("Contato Livre QA");
@@ -120,19 +122,21 @@ db.getDb()
 const ids = (rows) => rows.map((row) => row.id);
 const row = (table, id) => db.getDb().prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
 
-test("solicitações do site: vendedora vê o que é seu e a fila livre, nunca a carteira de outra", () => {
+test("solicitações do site: vendedora vê só o que é seu; sem responsável fica na triagem do administrador", () => {
   const deA = ids(siteLeads.listSiteQuotes(a));
-  assert.ok(deA.includes(leadA) && deA.includes(livre));
+  assert.ok(deA.includes(leadA));
+  assert.ok(!deA.includes(livre), "sem responsável: triagem do administrador");
   assert.ok(!deA.includes(leadB), "pedido atribuído à B");
   assert.ok(!deA.includes(livreConvertidoPelaB), "pedido sem responsável que a B já converteu");
   const deB = ids(siteLeads.listSiteQuotes(b));
-  assert.ok(deB.includes(leadB) && deB.includes(livre) && deB.includes(livreConvertidoPelaB));
+  assert.ok(deB.includes(leadB) && deB.includes(livreConvertidoPelaB) && !deB.includes(livre));
   assert.ok(!deB.includes(leadA));
   assert.equal(siteLeads.listSiteQuotes(admin).length, 4, "administrador vê todos");
   assert.deepEqual(ids(siteLeads.listSiteQuotes(a, { q: "Empresa QA 2" })), [], "a busca respeita a carteira");
   assert.deepEqual(ids(siteLeads.listSiteQuotes(admin, { q: "Empresa QA 2" })), [leadB]);
   const contatosDaB = ids(siteLeads.listSiteContacts(b));
-  assert.ok(contatosDaB.includes(contatoLivre) && !contatosDaB.includes(contatoDaA));
+  assert.deepEqual(contatosDaB, [], "contato sem dono é triagem; o da A é da A");
+  assert.ok(!ids(siteLeads.listSiteContacts(a)).includes(contatoLivre));
   assert.ok(ids(siteLeads.listSiteContacts(a)).includes(contatoDaA));
   assert.equal(siteLeads.listSiteContacts(admin).length, 2);
 });
@@ -147,7 +151,8 @@ test("abrir, mudar status ou notas pelo ID de outra carteira é negado e nada mu
   assert.equal(row("quote_requests", leadB).internal_notes, null);
   assert.equal(row("contact_requests", contatoDaA).status, "novo");
   assert.equal(siteLeads.readSiteQuote(a, leadA).id, leadA);
-  assert.equal(siteLeads.readSiteQuote(a, livre).quote_request_items.length, 1, "fila livre continua aberta para assumir");
+  await denied(() => siteLeads.readSiteQuote(a, livre), /triagem/);
+  assert.equal(siteLeads.readSiteQuote(admin, livre).quote_request_items.length, 1, "o administrador faz a triagem");
   assert.equal(siteLeads.readSiteQuote(admin, leadB).id, leadB);
   siteLeads.updateSiteLead(a, "quote", { id: leadA, status: "em atendimento", internal_notes: "retornar amanhã" });
   assert.equal(row("quote_requests", leadA).status, "em atendimento");
@@ -157,10 +162,11 @@ test("abrir, mudar status ou notas pelo ID de outra carteira é negado e nada mu
 
 test("página de Leads, busca geral e resumo do painel seguem a mesma carteira", async () => {
   const leads = ids(assignments.readAssignedLeads(a));
-  assert.ok(leads.includes(leadA) && leads.includes(livre));
+  assert.ok(leads.includes(leadA) && !leads.includes(livre));
   assert.ok(!leads.includes(leadB) && !leads.includes(livreConvertidoPelaB));
   await denied(() => assignments.readLeadAssignment(a, leadB));
-  assert.equal(assignments.readLeadAssignment(a, livre).canConvert, true);
+  await denied(() => assignments.readLeadAssignment(a, livre));
+  assert.equal(assignments.readLeadAssignment(a, leadA).canConvert, true);
   const titles = (user, query) => panel.searchPanelCore(user, query).map((result) => result.title);
   assert.ok(!titles(a, "Pedido QA").includes("Pedido QA 2"));
   assert.ok(titles(a, "Pedido QA").includes("Pedido QA 1"));
@@ -172,6 +178,15 @@ test("página de Leads, busca geral e resumo do painel seguem a mesma carteira",
   assert.ok(ids(resumo.lastContacts).includes(contatoDaA), "o contato trazido para a carteira da A aparece para a A");
   assert.ok(!ids(siteLeads.siteLeadsDashboard(b).lastContacts).includes(contatoDaA));
   assert.equal(siteLeads.siteLeadsDashboard(admin).lastQuotes.length, 4);
+});
+
+test("lead da triagem não pode ser convertido nem importado pela vendedora, nem pelo ID", async () => {
+  await denied(() => quotes.criarOrcamento(a, products, livre), /triagem/);
+  await denied(() => crm.importSiteLead(a, { sourceKind: "quote", sourceId: livre }));
+  await denied(() => crm.importSiteLead(b, { sourceKind: "contact", sourceId: contatoLivre }));
+  assert.equal(db.getDb().prepare("SELECT count(*) n FROM internal_quotes WHERE source_request_id=?").get(livre).n, 0);
+  const deA = quotes.criarOrcamento(a, products, leadA);
+  assert.ok(deA.id, "o que é dela continua convertendo normalmente");
 });
 
 test("perfis sem acesso comercial não leem solicitações, negociações, anexos nem WhatsApp", async () => {
@@ -275,7 +290,7 @@ test("contagens, busca de negociações e métricas comerciais ficam na carteira
   const deB = metrics.readCommercialMetrics(b, 30);
   const deA = metrics.readCommercialMetrics(a, 30);
   assert.equal(deB.scope, "pessoal");
-  assert.equal(deA.negotiations, 1, "só a negociação da própria A");
+  assert.equal(deA.negotiations, 2, "só as negociações da própria A (manual + pedido do site dela)");
   assert.equal(deB.negotiations, 1, "só a negociação da própria B");
-  assert.equal(metrics.readCommercialMetrics(admin, 30).negotiations, 2);
+  assert.equal(metrics.readCommercialMetrics(admin, 30).negotiations, 3);
 });

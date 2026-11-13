@@ -69,6 +69,8 @@ export function criarOrcamento(u: SiteUser, produtos: ProdutoIndice[], pedidoSit
         if (!ehAdmin(u) && existing['owner_id'] !== u.id) throw new Error('Forbidden: negociação existente de outro consultor');
         return { id: String(existing['id']), numero: String(existing['number']) };
       }
+      // Decisão D1 (13/11/2026): lead sem responsável fica na triagem — só o administrador distribui ou converte.
+      if (!ehAdmin(u) && !assignment?.ownerId) throw new Error('Forbidden: lead sem responsável está na triagem do administrador');
     }
     const ownerId = assignment?.ownerId || u.id;
     validateAssignedOwner(ownerId);
