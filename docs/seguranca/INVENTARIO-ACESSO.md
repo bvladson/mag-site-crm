@@ -3,7 +3,7 @@
 Gerado por `node docs/seguranca/gerar-inventario.mjs` a partir do código. Não editar à mão: rode o gerador.
 O teste `tests/seguranca-inventario.test.mjs` falha se surgir função pública sem justificativa ou perfil não resolvido.
 
-- Funções de servidor: **161**; públicas por desenho: **16**; rotas de API: **12**.
+- Funções de servidor: **165**; públicas por desenho: **16**; rotas de API: **12**.
 - O perfil é conferido no servidor (`authorize`). A carteira (dono do registro) é conferida dentro de cada módulo e
   provada nos testes `tests/seguranca-*.test.mjs` (ver `ISOLAMENTO-CARTEIRAS.md`).
 
@@ -11,7 +11,7 @@ O teste `tests/seguranca-inventario.test.mjs` falha se surgir função pública 
 
 | Perfil exigido | Funções |
 | --- | --- |
-| admin, comercial | 69 |
+| admin, comercial | 73 |
 | admin | 48 |
 | PÚBLICA (sem login) | 16 |
 | qualquer perfil do painel | 11 |
@@ -92,6 +92,10 @@ O teste `tests/seguranca-inventario.test.mjs` falha se surgir função pública 
 | auth.functions.ts | updateMyPassword | POST | qualquer perfil do painel |
 | careers.functions.ts | listOpenJobs | GET | PÚBLICA (sem login) |
 | careers.functions.ts | getPublicJob | GET | PÚBLICA (sem login) |
+| crm-catalogo.functions.ts | getOpportunityDraft | GET | admin, comercial |
+| crm-catalogo.functions.ts | saveOpportunityDraft | POST | admin, comercial |
+| crm-catalogo.functions.ts | createQuoteFromDraft | POST | admin, comercial |
+| crm-catalogo.functions.ts | getContactOrders | GET | admin, comercial |
 | crm-integrations.functions.ts | getEvolutionConnection | GET | admin, comercial |
 | crm-integrations.functions.ts | getCrmConnection | GET | admin, comercial |
 | crm-integrations.functions.ts | getCrmIntegrationSettings | GET | admin |

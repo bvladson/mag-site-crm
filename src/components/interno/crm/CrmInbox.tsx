@@ -48,6 +48,8 @@ import { MoveMenu } from "./OpportunityCard";
 import { DayDivider, MessageBubble, MessageTicks, opensGroup } from "./ChatParts";
 import { ComposerBar, ComposerFilePreview } from "./ChatComposer";
 import { InboxFilters } from "./InboxFilters";
+import { CatalogDrawer } from "./CatalogDrawer";
+import { OrdersCard } from "./OrdersCard";
 import { chatDayKey, dayLabel, formatPhone, isLate, listTime, previewText } from "./chatFormat";
 
 const MAX_ATTACHMENT_BYTES = 7 * 1024 * 1024;
@@ -425,6 +427,7 @@ function Chat({
       .filter((item) => item.contactId === contactId && item.stage !== "perdido")
       .sort((a, b) => b.lastInteraction.localeCompare(a.lastInteraction))[0];
   const [text, setText] = useState("");
+  const [catalogOpen, setCatalogOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -819,16 +822,15 @@ function Chat({
         className="wa-composer px-3 pb-2.5 pt-2 md:px-4"
       >
         <div className="mb-2 flex gap-1.5 overflow-x-auto" role="group" aria-label="Atalhos do atendimento">
-          <a
-            href="/interno/produtos"
-            target="_blank"
-            rel="noopener noreferrer"
+          <button
+            type="button"
             className="wa-chip"
-            title="Consulta de produtos (abre em outra aba)"
+            title="Catálogo: produtos, estoque e rascunho do orçamento sem sair da conversa"
+            onClick={() => setCatalogOpen(true)}
           >
             <PackageSearch aria-hidden="true" />
             Produtos
-          </a>
+          </button>
           {opportunity && (
             <>
               <button
@@ -918,6 +920,16 @@ function Chat({
           )}
         </p>
       </form>
+      {/* Fora do formulário da mensagem: o submit do catálogo (portal) nunca pode chegar ao envio. */}
+      <CatalogDrawer
+        open={catalogOpen}
+        onOpenChange={setCatalogOpen}
+        opportunity={opportunity ? { id: opportunity.id, title: opportunity.title, stage: opportunity.stage } : undefined}
+        onInsert={(value) => {
+          setText((current) => (current.trim() ? `${current}\n${value}` : value));
+          setCatalogOpen(false);
+        }}
+      />
     </>
   );
 }
@@ -972,6 +984,7 @@ function ClientCard({ contactId }: { contactId: string }) {
           </button>
         ))}
       </div>
+      <OrdersCard contactId={contactId} />
       <div className="grid gap-2">
         <Button variant="outline" onClick={() => open({ kind: "newOpportunity", contactId })}>
           Nova oportunidade

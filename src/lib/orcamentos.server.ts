@@ -112,6 +112,35 @@ export function criarOrcamento(u: SiteUser, produtos: ProdutoIndice[], pedidoSit
 }
 
 /**
+ * Acrescenta itens a uma negociação editável com preço ZERO — o mesmo que a conversão do pedido do site faz: preço,
+ * desconto e condições continuam sendo definidos pelo vendedor no editor (nenhuma regra financeira nova aqui).
+ * `naMesmaTransacao` roda antes do COMMIT (o rascunho do Atendimento confere a revisão e se apaga junto: exatamente uma vez).
+ */
+export function adicionarItens(
+  u: SiteUser,
+  id: string,
+  itens: { produto: ProdutoIndice; qtd: number }[],
+  naMesmaTransacao?: () => void,
+) {
+  return transaction(() => {
+    const q = orcamentoDoUsuario(u, id);
+    if (!editavel(q["status"] as Estado)) throw new Error("Orçamento aceito, enviado ao Omie ou cancelado não pode ser alterado");
+    if (!itens.length) throw new Error("Nenhum item para acrescentar");
+    const db = getDb();
+    const atual = db.prepare("SELECT count(*) n, COALESCE(max(position),0) p FROM internal_quote_items WHERE quote_id=?").get(id) as Linha;
+    if (Number(atual["n"]) + itens.length > 199) throw new Error("no máximo 199 itens por pedido");
+    const inserir = db.prepare(`INSERT INTO internal_quote_items(id,quote_id,position,omie_product_id,sku,name,unit,quantity,unit_price_cents,discount_type,
+      discount_value,gross_cents,discount_cents,total_cents,applied_price_cents) VALUES (?,?,?,?,?,?,?,?,0,NULL,0,0,0,0,0)`);
+    itens.forEach((item, i) =>
+      inserir.run(randomUUID(), id, Number(atual["p"]) + i + 1, item.produto.id, item.produto.sku, item.produto.nome, item.produto.unidade || "UN", item.qtd));
+    db.prepare("UPDATE internal_quotes SET version=version+1, updated_at=? WHERE id=?").run(agoraIso(), id);
+    naMesmaTransacao?.();
+    audit(u.id, "quote:items:added", id, { itens: itens.length, versao: Number(q["version"]) + 1 });
+    return { id, numero: s(q["number"]), versao: Number(q["version"]) + 1, adicionados: itens.length };
+  });
+}
+
+/**
  * "Duplicar orçamento": nova negociação/opção com número novo (= código de integração novo), copiando cliente, itens,
  * condições e dados da proposta. Histórico separado: nenhuma versão de proposta, aceite, envio ao Omie ou nota interna vem
  * junto. O dono continua o mesmo (o vendedor não muda, mesmo quando quem duplica é o Admin).

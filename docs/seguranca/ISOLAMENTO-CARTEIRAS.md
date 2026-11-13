@@ -26,6 +26,8 @@ conferido pelo teste `tests/seguranca-inventario.test.mjs`.
 | Negociações, proposta, PDF, e-mail e versões | Dono do orçamento; administrador em todos | `orcamentos.server.ts` (`orcamentoDoUsuario`) e rota do PDF | `proposta`, `seguranca-carteiras` |
 | Pedido no Omie (revisão, cliente, pedido, status) | Dono do orçamento; o código da revisão fica preso ao mesmo usuário e orçamento | `omie-conversao.server.ts` | `omie-conversao`, `seguranca-carteiras` |
 | Descontos | O dono pede e vê; gerente ou administrador decidem | `discounts.server.ts` | `discounts`, `seguranca-carteiras` |
+| Rascunho do catálogo (Atendimento) | Da oportunidade e do dono atual; se a oportunidade muda de mão, o rascunho antigo some; "Gerar orçamento" passa pelo motor da negociação | `crm-catalogo.server.ts` | `crm-catalogo` |
+| Pedidos do cliente (Ficha) | Só negociações da carteira; status lido do que já foi registrado | `crm-catalogo.server.ts` (`pedidosDoContato`) | `crm-catalogo` |
 | **Solicitações do site** (pedidos de orçamento e contatos) — **corrigido** | O que é seu (atribuído, convertido em negociação sua ou trazido para uma oportunidade sua) mais a fila livre. Nunca o que é de outro vendedor | `site-leads.server.ts`: listas, detalhe, status e notas, página Leads, busca geral e resumo do painel | `seguranca-carteiras` (falhava antes da correção) |
 | Busca geral do painel | CRM, negociações e solicitações dentro da carteira; candidaturas só para administrador e DHO | `panel.server.ts` | `seguranca-carteiras` |
 | Contagens e métricas comerciais | Escopo pessoal para o vendedor | `panelCountsCore`, `links-metrics.server.ts` | `seguranca-carteiras` |
