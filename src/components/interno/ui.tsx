@@ -32,6 +32,7 @@ import {
   Settings,
   GitBranch,
   History,
+  Activity,
 } from "lucide-react";
 import { getMe, type Role } from "@/lib/admin.functions";
 import { logout } from "@/lib/auth.functions";
@@ -120,6 +121,7 @@ const NAV: {
       { to: "/interno/proposta", label: "Dados da proposta", icon: Stamp, roles: ["admin"] },
       { to: "/interno/omie", label: "Integração Omie", icon: Plug, roles: ["admin"] },
       { to: "/interno/auditoria", label: "Auditoria", icon: History, roles: ["admin"] },
+      { to: "/interno/saude", label: "Saúde do sistema", icon: Activity, roles: ["admin"] },
       { to: "/interno/seguranca", label: "Segurança e MFA", icon: ShieldCheck, roles: ALL },
       { to: "/interno/conta", label: "Minha conta", icon: KeyRound, roles: ALL },
     ],

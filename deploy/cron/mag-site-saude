@@ -1,0 +1,8 @@
+# Projeto mag-site — saúde do servidor para o painel "Saúde do sistema" (módulo 1 — estabilidade).
+# A cada 5 min grava /opt/mag-site/data/saude-host.json (disco, memória, contêineres, backups e vigia do WhatsApp).
+# Somente leitura do servidor; silencioso quando está bem; erros em /var/log/mag-site-saude.log.
+# Instalação: /etc/cron.d/mag-site-saude (root:root 0644). Desfazer: remover o arquivo (o painel passa a avisar
+# "sem dados do servidor" e nada mais muda).
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/5 * * * * root /opt/mag-site/bin/saude-host.py >>/var/log/mag-site-saude.log 2>&1

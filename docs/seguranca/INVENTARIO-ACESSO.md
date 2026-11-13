@@ -3,7 +3,7 @@
 Gerado por `node docs/seguranca/gerar-inventario.mjs` a partir do código. Não editar à mão: rode o gerador.
 O teste `tests/seguranca-inventario.test.mjs` falha se surgir função pública sem justificativa ou perfil não resolvido.
 
-- Funções de servidor: **160**; públicas por desenho: **16**; rotas de API: **12**.
+- Funções de servidor: **161**; públicas por desenho: **16**; rotas de API: **12**.
 - O perfil é conferido no servidor (`authorize`). A carteira (dono do registro) é conferida dentro de cada módulo e
   provada nos testes `tests/seguranca-*.test.mjs` (ver `ISOLAMENTO-CARTEIRAS.md`).
 
@@ -12,7 +12,7 @@ O teste `tests/seguranca-inventario.test.mjs` falha se surgir função pública 
 | Perfil exigido | Funções |
 | --- | --- |
 | admin, comercial | 69 |
-| admin | 47 |
+| admin | 48 |
 | PÚBLICA (sem login) | 16 |
 | qualquer perfil do painel | 11 |
 | admin, dho | 11 |
@@ -205,6 +205,7 @@ O teste `tests/seguranca-inventario.test.mjs` falha se surgir função pública 
 | propostas.functions.ts | salvarPerfilComercial | POST | admin, comercial |
 | propostas.functions.ts | gerenciarVersoesDaProposta | POST | admin, comercial |
 | propostas.functions.ts | compararVersoesDaProposta | POST | admin, comercial |
+| saude.functions.ts | getSystemHealth | GET | admin |
 | site-content-admin.functions.ts | getSiteContentAdmin | GET | admin |
 | site-content-admin.functions.ts | saveSiteContentDraft | POST | admin |
 | site-content-admin.functions.ts | publishSiteContent | POST | admin |

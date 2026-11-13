@@ -59,6 +59,7 @@ import { Route as AuthenticatedInternoOmieRouteImport } from './routes/_authenti
 import { Route as AuthenticatedInternoProdutosRouteImport } from './routes/_authenticated/interno.produtos'
 import { Route as AuthenticatedInternoPropostaRouteImport } from './routes/_authenticated/interno.proposta'
 import { Route as AuthenticatedInternoRedesRouteImport } from './routes/_authenticated/interno.redes'
+import { Route as AuthenticatedInternoSaudeRouteImport } from './routes/_authenticated/interno.saude'
 import { Route as AuthenticatedInternoSegurancaRouteImport } from './routes/_authenticated/interno.seguranca'
 import { Route as AuthenticatedInternoUnidadesRouteImport } from './routes/_authenticated/interno.unidades'
 import { Route as AuthenticatedInternoUsuariosRouteImport } from './routes/_authenticated/interno.usuarios'
@@ -355,6 +356,12 @@ const AuthenticatedInternoRedesRoute =
     path: '/redes',
     getParentRoute: () => AuthenticatedInternoRoute,
   } as any)
+const AuthenticatedInternoSaudeRoute =
+  AuthenticatedInternoSaudeRouteImport.update({
+    id: '/saude',
+    path: '/saude',
+    getParentRoute: () => AuthenticatedInternoRoute,
+  } as any)
 const AuthenticatedInternoSegurancaRoute =
   AuthenticatedInternoSegurancaRouteImport.update({
     id: '/seguranca',
@@ -583,6 +590,7 @@ export interface FileRoutesByFullPath {
   '/interno/produtos': typeof AuthenticatedInternoProdutosRoute
   '/interno/proposta': typeof AuthenticatedInternoPropostaRoute
   '/interno/redes': typeof AuthenticatedInternoRedesRoute
+  '/interno/saude': typeof AuthenticatedInternoSaudeRoute
   '/interno/seguranca': typeof AuthenticatedInternoSegurancaRoute
   '/interno/unidades': typeof AuthenticatedInternoUnidadesRoute
   '/interno/usuarios': typeof AuthenticatedInternoUsuariosRoute
@@ -663,6 +671,7 @@ export interface FileRoutesByTo {
   '/interno/produtos': typeof AuthenticatedInternoProdutosRoute
   '/interno/proposta': typeof AuthenticatedInternoPropostaRoute
   '/interno/redes': typeof AuthenticatedInternoRedesRoute
+  '/interno/saude': typeof AuthenticatedInternoSaudeRoute
   '/interno/seguranca': typeof AuthenticatedInternoSegurancaRoute
   '/interno/unidades': typeof AuthenticatedInternoUnidadesRoute
   '/interno/usuarios': typeof AuthenticatedInternoUsuariosRoute
@@ -747,6 +756,7 @@ export interface FileRoutesById {
   '/_authenticated/interno/produtos': typeof AuthenticatedInternoProdutosRoute
   '/_authenticated/interno/proposta': typeof AuthenticatedInternoPropostaRoute
   '/_authenticated/interno/redes': typeof AuthenticatedInternoRedesRoute
+  '/_authenticated/interno/saude': typeof AuthenticatedInternoSaudeRoute
   '/_authenticated/interno/seguranca': typeof AuthenticatedInternoSegurancaRoute
   '/_authenticated/interno/unidades': typeof AuthenticatedInternoUnidadesRoute
   '/_authenticated/interno/usuarios': typeof AuthenticatedInternoUsuariosRoute
@@ -831,6 +841,7 @@ export interface FileRouteTypes {
     | '/interno/produtos'
     | '/interno/proposta'
     | '/interno/redes'
+    | '/interno/saude'
     | '/interno/seguranca'
     | '/interno/unidades'
     | '/interno/usuarios'
@@ -911,6 +922,7 @@ export interface FileRouteTypes {
     | '/interno/produtos'
     | '/interno/proposta'
     | '/interno/redes'
+    | '/interno/saude'
     | '/interno/seguranca'
     | '/interno/unidades'
     | '/interno/usuarios'
@@ -994,6 +1006,7 @@ export interface FileRouteTypes {
     | '/_authenticated/interno/produtos'
     | '/_authenticated/interno/proposta'
     | '/_authenticated/interno/redes'
+    | '/_authenticated/interno/saude'
     | '/_authenticated/interno/seguranca'
     | '/_authenticated/interno/unidades'
     | '/_authenticated/interno/usuarios'
@@ -1427,6 +1440,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedInternoRedesRouteImport
       parentRoute: typeof AuthenticatedInternoRoute
     }
+    '/_authenticated/interno/saude': {
+      id: '/_authenticated/interno/saude'
+      path: '/saude'
+      fullPath: '/interno/saude'
+      preLoaderRoute: typeof AuthenticatedInternoSaudeRouteImport
+      parentRoute: typeof AuthenticatedInternoRoute
+    }
     '/_authenticated/interno/seguranca': {
       id: '/_authenticated/interno/seguranca'
       path: '/seguranca'
@@ -1689,6 +1709,7 @@ interface AuthenticatedInternoRouteChildren {
   AuthenticatedInternoProdutosRoute: typeof AuthenticatedInternoProdutosRoute
   AuthenticatedInternoPropostaRoute: typeof AuthenticatedInternoPropostaRoute
   AuthenticatedInternoRedesRoute: typeof AuthenticatedInternoRedesRoute
+  AuthenticatedInternoSaudeRoute: typeof AuthenticatedInternoSaudeRoute
   AuthenticatedInternoSegurancaRoute: typeof AuthenticatedInternoSegurancaRoute
   AuthenticatedInternoUnidadesRoute: typeof AuthenticatedInternoUnidadesRoute
   AuthenticatedInternoUsuariosRoute: typeof AuthenticatedInternoUsuariosRoute
@@ -1721,6 +1742,7 @@ const AuthenticatedInternoRouteChildren: AuthenticatedInternoRouteChildren = {
   AuthenticatedInternoProdutosRoute: AuthenticatedInternoProdutosRoute,
   AuthenticatedInternoPropostaRoute: AuthenticatedInternoPropostaRoute,
   AuthenticatedInternoRedesRoute: AuthenticatedInternoRedesRoute,
+  AuthenticatedInternoSaudeRoute: AuthenticatedInternoSaudeRoute,
   AuthenticatedInternoSegurancaRoute: AuthenticatedInternoSegurancaRoute,
   AuthenticatedInternoUnidadesRoute: AuthenticatedInternoUnidadesRoute,
   AuthenticatedInternoUsuariosRoute: AuthenticatedInternoUsuariosRoute,
