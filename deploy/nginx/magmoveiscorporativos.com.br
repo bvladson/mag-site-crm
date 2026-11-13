@@ -2,6 +2,13 @@
 # Container em 127.0.0.1:3020. Certificado via webroot (/var/www/letsencrypt).
 # nginx 1.24: http2 é parâmetro do listen e já vem habilitado na socket 443 por outro bloco.
 
+# Microfone só no painel interno (/interno): gravação de áudio no Atendimento do CRM (release
+# 20261113-crm-atendimento-whatsapp). O site público continua com o microfone bloqueado.
+map $uri $mag_permissions_policy {
+    default            "camera=(), microphone=(), geolocation=()";
+    ~^/interno(/|$)    "camera=(), microphone=(self), geolocation=()";
+}
+
 server {
     listen 80;
     listen [::]:80;
@@ -50,12 +57,12 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+    add_header Permissions-Policy $mag_permissions_policy always;
     # CSP só em modo RELATÓRIO: não bloqueia nada. Base = recursos realmente usados (o próprio domínio + Google Fonts;
     # mapeado em 05/10/2026: 0 violações em 17 páginas, desktop e celular). Violações → /api/csp-report (log do
     # container, linhas "[csp]"). Antes de virar Content-Security-Policy (bloqueando), ver MANIFESTO → "CSP".
     # frame-src: só o player do YouTube sem cookies (/redes e home), carregado ao clicar e com consentimento de marketing.
-    add_header Content-Security-Policy-Report-Only "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' blob: data:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-src 'self' https://www.youtube-nocookie.com; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; manifest-src 'self'; worker-src 'self'; report-uri /api/csp-report; report-to csp" always;
+    add_header Content-Security-Policy-Report-Only "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' blob: data:; media-src 'self' blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-src 'self' https://www.youtube-nocookie.com; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; manifest-src 'self'; worker-src 'self'; report-uri /api/csp-report; report-to csp" always;
     add_header Reporting-Endpoints 'csp="https://magmoveiscorporativos.com.br/api/csp-report"' always;
 
     gzip on;

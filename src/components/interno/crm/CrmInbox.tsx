@@ -5,19 +5,19 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeft,
   CalendarClock,
-  FileText,
-  IdCard,
-  MessageCircle,
-  Search,
-  Send,
-  WifiOff,
-  Wifi,
-  ExternalLink,
-  Paperclip,
-  X,
-  Loader2,
+  ChevronDown,
   ChevronUp,
+  ExternalLink,
+  FileText,
   History,
+  IdCard,
+  Loader2,
+  MessageCircle,
+  PackageSearch,
+  Search,
+  SquareKanban,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -32,28 +32,31 @@ import {
 import { cn } from "@/lib/utils";
 import { proposalsFor, useCrm } from "./CrmProvider";
 import { Avatar, EmptyState, NextActionLine, OriginBadge, ProposalBadge, StageBadge } from "./bits";
-import { money, normalize, relative, time } from "./format";
+import { money, normalize } from "./format";
 import { getCrmConversationPage } from "@/lib/crm.functions";
-import type { Message } from "@/lib/crm";
-import { MessageMedia, mediaSize } from "./MessageMedia";
+import { STAGE_LABEL, type Message } from "@/lib/crm";
 import {
   bindWahaContactOpportunity,
   getWahaContactContext,
   syncWahaContactHistory,
 } from "@/lib/crm-waha.functions";
+import { MoveMenu } from "./OpportunityCard";
+import { DayDivider, MessageBubble, MessageTicks, opensGroup } from "./ChatParts";
+import { ComposerBar, ComposerFilePreview } from "./ChatComposer";
+import { InboxFilters } from "./InboxFilters";
+import {
+  INBOX_VIEWS,
+  chatDayKey,
+  dayLabel,
+  formatPhone,
+  inboxViews,
+  isLate,
+  listTime,
+  previewText,
+  type InboxView,
+} from "./chatFormat";
 
 const MAX_ATTACHMENT_BYTES = 7 * 1024 * 1024;
-const messageState: Record<string, string> = {
-  pending: "Na fila",
-  queued: "Na fila",
-  sent: "Enviada",
-  delivered: "Entregue",
-  read: "Lida",
-  played: "Reproduzida",
-  received: "Recebida",
-  failed: "Falha",
-  uncertain: "Envio não confirmado",
-};
 
 export function CrmInbox({
   selected,
@@ -63,9 +66,17 @@ export function CrmInbox({
   selectedOpportunity: string | undefined;
 }) {
   const navigate = useNavigate();
-  const { contacts, conversations, opportunities, connection, connectionLoading, markRead } =
-    useCrm();
+  const {
+    contacts,
+    conversations,
+    opportunities,
+    proposals,
+    connection,
+    connectionLoading,
+    markRead,
+  } = useCrm();
   const [query, setQuery] = useState("");
+  const [view, setView] = useState<InboxView>("todas");
   const [cardOpen, setCardOpen] = useState(false);
   const unread = conversations
     .filter((item) => item.contactId === selected)
@@ -77,18 +88,34 @@ export function CrmInbox({
   }, [selected, unread]);
   const select = (id?: string) =>
     navigate({ to: "/interno/crm/atendimento", search: id ? { c: id } : {} });
-  const rows = contacts
+  const now = new Date();
+  const searched = contacts
     .map((customer) => {
       const threads = conversations.filter((item) => item.contactId === customer.id);
       const messages = threads
         .flatMap((item) => item.messages)
         .sort((a, b) => a.at.localeCompare(b.at));
-      return {
-        customer,
-        unread: threads.reduce((sum, item) => sum + item.unread, 0),
-        last: messages.at(-1),
-        messages,
-      };
+      const last = messages.at(-1);
+      const unread = threads.reduce((sum, item) => sum + item.unread, 0);
+      // Filtros rápidos com os dados reais da carteira (o bootstrap da v1 traz todas as conversas).
+      const open = opportunities.filter(
+        (item) =>
+          item.contactId === customer.id && item.stage !== "fechado" && item.stage !== "perdido",
+      );
+      const nextDue = open.map((item) => item.nextAction?.due ?? "").filter(Boolean);
+      const views = inboxViews(
+        {
+          unread,
+          lastFrom: last?.from,
+          awaitingReply: open.some((item) => item.awaitingReply),
+          nextDue,
+          hasProposal: open.some((item) =>
+            proposalsFor(proposals, item.id).some((proposal) => proposal.status !== "Cancelada"),
+          ),
+        },
+        now,
+      );
+      return { customer, unread, last, messages, views, late: isLate(nextDue, now) };
     })
     .filter(
       ({ customer, messages }) =>
@@ -99,17 +126,22 @@ export function CrmInbox({
             .map((item) => item.interest)
             .join(" ")} ${messages.map((item) => item.text).join(" ")}`,
         ).includes(normalize(query)),
-    )
+    );
+  const counts = Object.fromEntries(
+    INBOX_VIEWS.map((item) => [item.id, searched.filter((row) => row.views.has(item.id)).length]),
+  ) as Record<InboxView, number>;
+  const rows = searched
+    .filter((row) => row.views.has(view))
     .sort((a, b) => (b.last?.at ?? "").localeCompare(a.last?.at ?? ""));
   return (
     <div className="crm-inbox flex">
       <aside
         className={cn(
-          "flex w-full flex-col border-r bg-card md:w-72 md:shrink-0",
+          "flex w-full flex-col border-r bg-card md:w-80 md:shrink-0 2xl:w-[22rem]",
           selected && "hidden md:flex",
         )}
       >
-        <div className="space-y-3 border-b p-4">
+        <div className="space-y-3 border-b px-4 pb-3 pt-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h1 className="text-lg font-semibold">Atendimento</h1>
             <span
@@ -137,44 +169,57 @@ export function CrmInbox({
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Nome, telefone ou interesse"
-              className="pl-9"
+              className="rounded-full bg-[var(--wa-header)] pl-9"
             />
           </div>
+          <InboxFilters value={view} counts={counts} onChange={setView} />
         </div>
         <ul className="flex-1 overflow-y-auto">
           {rows.length ? (
-            rows.map(({ customer, unread: count, last }) => (
+            rows.map(({ customer, unread: count, last, late }) => (
               <li key={customer.id}>
                 <button
                   type="button"
                   onClick={() => select(customer.id)}
-                  className={cn(
-                    "flex w-full gap-3 border-b px-4 py-3 text-left hover:bg-accent",
-                    selected === customer.id && "crm-brand",
-                  )}
+                  aria-current={selected === customer.id ? "true" : undefined}
+                  className="wa-list-item"
                 >
-                  <Avatar name={customer.name} />
+                  <Avatar name={customer.name} className="wa-list-avatar" />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline justify-between gap-2">
-                      <span className={cn("truncate", count ? "font-semibold" : "font-medium")}>
+                      <span
+                        className={cn("truncate text-[15px]", count ? "font-semibold" : "font-medium")}
+                      >
                         {customer.name}
                       </span>
                       {last && (
-                        <span className="shrink-0 text-[10px] text-muted-foreground">
-                          {time(last.at)}
+                        <span className={cn("wa-time", count > 0 && "wa-time-unread")}>
+                          {listTime(last.at, now)}
                         </span>
                       )}
                     </div>
                     <div className="mt-0.5 flex items-center justify-between gap-2">
-                      <span className="truncate text-sm text-muted-foreground">
-                        {last?.from === "vendedora" && "Você: "}
-                        {last?.text || "Sem mensagens registradas"}
+                      <span className={cn("wa-preview", count > 0 && "wa-preview-unread")}>
+                        {last?.from === "vendedora" && (
+                          <MessageTicks status={last.status} className="size-4" />
+                        )}
+                        <span className="truncate">
+                          {last?.from === "vendedora" && "Você: "}
+                          {previewText(last?.text) || "Sem mensagens registradas"}
+                        </span>
                       </span>
-                      {count > 0 && (
-                        <span className="grid size-5 shrink-0 place-items-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+                      {count > 0 ? (
+                        <span className="wa-unread" aria-label={`${count} não lida(s)`}>
                           {count}
                         </span>
-                      )}
+                      ) : late ? (
+                        <span title="Retorno atrasado" className="inline-flex shrink-0">
+                          <CalendarClock
+                            className="size-4 text-[var(--crm-warning)]"
+                            aria-label="Retorno atrasado"
+                          />
+                        </span>
+                      ) : null}
                     </div>
                   </div>
                 </button>
@@ -182,7 +227,7 @@ export function CrmInbox({
             ))
           ) : (
             <li className="p-6 text-center text-sm text-muted-foreground">
-              {query
+              {query || view !== "todas"
                 ? "Nenhum atendimento neste filtro."
                 : "Os clientes e as conversas recebidas aparecerão aqui."}
             </li>
@@ -317,9 +362,24 @@ function Chat({
   const end = useRef<HTMLDivElement>(null);
   const historyElement = useRef<HTMLDivElement>(null);
   const newestMessageId = messages.at(-1)?.id;
+  // Fica no fim da conversa quando a área muda de tamanho (barra da oportunidade, fotos carregando),
+  // a não ser que a pessoa tenha rolado para cima para ler mensagens antigas.
+  const pinnedToEnd = useRef(true);
+  const contentElement = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    pinnedToEnd.current = true;
     end.current?.scrollIntoView({ block: "nearest", behavior: "auto" });
   }, [newestMessageId]);
+  useEffect(() => {
+    const element = historyElement.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (pinnedToEnd.current) element.scrollTop = element.scrollHeight;
+    });
+    observer.observe(element);
+    if (contentElement.current) observer.observe(contentElement.current);
+    return () => observer.disconnect();
+  }, [Boolean(customer), messages.length > 0]);
   useEffect(() => {
     if (newestMessageId) void markRead(contactId).catch(() => {});
   }, [newestMessageId, contactId]);
@@ -378,32 +438,59 @@ function Chat({
     messageAttempt.current = null;
     setSendError(null);
   };
+  // Mensagens agrupadas por dia: cada grupo tem sua etiqueta ("Hoje", "Ontem"...) presa no topo ao rolar.
+  const dayGroups: { key: string; at: string; label: string; messages: Message[] }[] = [];
+  for (const message of messages) {
+    const key = chatDayKey(message.at);
+    const group = dayGroups.at(-1);
+    if (group?.key === key) group.messages.push(message);
+    else dayGroups.push({ key, at: message.at, label: dayLabel(message.at), messages: [message] });
+  }
   return (
     <>
-      <header className="flex flex-wrap items-center gap-3 border-b bg-card px-3 py-3 md:px-4">
+      <header className="wa-header flex flex-wrap items-center gap-1 border-b px-2 py-2 sm:gap-2 sm:px-3 md:px-4">
         <button
           type="button"
           onClick={onBack}
           aria-label="Voltar para atendimentos"
-          className="rounded-md p-1.5 hover:bg-accent md:hidden"
+          className="rounded-full p-2 hover:bg-accent md:hidden"
         >
-          <ArrowLeft className="size-4" />
+          <ArrowLeft className="size-5" />
         </button>
-        <Avatar name={customer.name} />
-        <div className="min-w-0 flex-1">
+        <Avatar name={customer.name} className="size-10" />
+        <div className="min-w-0 flex-1 sm:min-w-[7rem]">
           <p className="truncate font-semibold">{customer.name}</p>
-          <p className="text-xs text-muted-foreground">
-            {customer.phone || "Telefone não informado"}
+          <p className="truncate text-xs text-muted-foreground">
+            {formatPhone(customer.phone) || "Telefone não informado"}
+            {opportunity && ` · ${STAGE_LABEL[opportunity.stage]}`}
           </p>
         </div>
-        <Button size="sm" variant="outline" onClick={onCard}>
+        {/* No xl a ficha já aparece ao lado; o botão fica para telas menores. */}
+        <Button size="sm" variant="ghost" onClick={onCard} className="xl:hidden" title="Ficha do cliente">
           <IdCard />
-          Ficha
+          <span className="hidden sm:inline">Ficha</span>
         </Button>
+        {opportunity && (
+          <MoveMenu
+            opp={opportunity}
+            trigger={
+              <Button
+                size="sm"
+                variant="ghost"
+                title={`Mover no funil (etapa atual: ${STAGE_LABEL[opportunity.stage]})`}
+                aria-label={`Mover no funil. Etapa atual: ${STAGE_LABEL[opportunity.stage]}`}
+              >
+                <SquareKanban />
+                <span className="hidden 2xl:inline">{STAGE_LABEL[opportunity.stage]}</span>
+                <ChevronDown className="size-3.5 opacity-70" />
+              </Button>
+            }
+          />
+        )}
         {canSyncHistory && (
           <Button
             size="sm"
-            variant="outline"
+            variant="ghost"
             disabled={!connection?.connected || syncingHistory}
             title="Busca no WhatsApp o histórico disponível somente desta conversa"
             onClick={async () => {
@@ -424,17 +511,7 @@ function Chat({
             }}
           >
             {syncingHistory ? <Loader2 className="animate-spin" /> : <History />}
-            <span className="hidden lg:inline">Buscar histórico</span>
-          </Button>
-        )}
-        {opportunity && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => open({ kind: "schedule", id: opportunity.id })}
-          >
-            <CalendarClock />
-            <span className="hidden lg:inline">Retorno</span>
+            <span className="hidden 2xl:inline">Buscar histórico</span>
           </Button>
         )}
       </header>
@@ -500,16 +577,21 @@ function Chat({
         </div>
       )}
       <div
-        className="flex-1 space-y-3 overflow-y-auto px-3 py-5 md:px-5"
+        className="wa-wallpaper flex-1 overflow-y-auto px-3 pb-4 pt-2 md:px-[5%]"
         aria-label="Histórico de mensagens"
         ref={historyElement}
+        onScroll={(event) => {
+          const element = event.currentTarget;
+          pinnedToEnd.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+        }}
       >
         {history.hasNextPage && (
-          <div className="text-center">
+          <div className="pt-2 text-center">
             <Button
               type="button"
               size="sm"
               variant="outline"
+              className="rounded-full bg-white shadow-sm"
               disabled={history.isFetchingNextPage}
               onClick={async () => {
                 const element = historyElement.current;
@@ -531,14 +613,14 @@ function Chat({
           </div>
         )}
         {history.isLoading && (
-          <p role="status" className="text-center text-sm text-muted-foreground">
+          <p role="status" className="wa-notice">
             Carregando mensagens…
           </p>
         )}
         {history.isError && (
           <p
             role="alert"
-            className="rounded-md border border-destructive/30 p-3 text-sm text-destructive"
+            className="mx-auto mt-2 max-w-md rounded-md border border-destructive/30 bg-white p-3 text-sm text-destructive"
           >
             Não foi possível atualizar as mensagens.{" "}
             <button type="button" className="underline" onClick={() => void history.refetch()}>
@@ -547,36 +629,23 @@ function Chat({
           </p>
         )}
         {messages.length ? (
-          messages.map((message) => (
-            <div
-              key={message.id}
-              className={cn("flex", message.from === "vendedora" ? "justify-end" : "justify-start")}
-            >
-              <div
-                className={cn(
-                  "max-w-[88%] rounded-xl border px-3 py-2 text-sm shadow-sm",
-                  message.from === "vendedora" ? "crm-bubble-out" : "bg-card",
-                )}
-              >
-                {message.attachments?.length ? (
-                  <MessageMedia attachments={message.attachments} />
-                ) : null}
-                {message.text && (
-                  <p className={cn("whitespace-pre-wrap", message.attachments?.length && "mt-2")}>
-                    {message.text}
-                  </p>
-                )}
-                <p className="mt-1 text-right text-[10px] text-muted-foreground">
-                  {message.channel !== "whatsapp" && `${message.channel} · `}
-                  {relative(message.at)}
-                  {message.from === "vendedora" &&
-                    ` · ${messageState[message.status] || message.status}`}
-                </p>
-              </div>
-            </div>
-          ))
+          <div ref={contentElement}>
+            {dayGroups.map((group) => (
+              <section key={group.key} aria-label={`Mensagens de ${group.label}`}>
+                <DayDivider at={group.at} />
+                {group.messages.map((message, index) => (
+                  <MessageBubble
+                    key={message.id}
+                    message={message}
+                    first={opensGroup(group.messages[index - 1], message, true)}
+                    contactName={customer.name}
+                  />
+                ))}
+              </section>
+            ))}
+          </div>
         ) : !history.isLoading && !history.isError ? (
-          <div className="py-8">
+          <div className="mx-auto mt-6 max-w-md rounded-xl bg-white/90 py-8 shadow-sm">
             <EmptyState
               icon={MessageCircle}
               title="Nenhuma mensagem registrada"
@@ -655,114 +724,105 @@ function Chat({
             setUploading(false);
           }
         }}
-        className="border-t bg-card px-3 py-3 md:px-4"
+        className="wa-composer px-3 pb-2.5 pt-2 md:px-4"
       >
-        {file && (
-          <div className="mb-2 flex items-center gap-2 rounded-lg border bg-background p-2">
-            {filePreview ? (
-              <img
-                src={filePreview}
-                alt="Prévia do arquivo selecionado"
-                className="size-12 rounded object-cover"
-              />
-            ) : (
-              <FileText className="size-6 shrink-0 text-muted-foreground" />
-            )}
-            <div className="min-w-0 flex-1 text-xs">
-              <p className="break-all font-medium">{file.name}</p>
-              <p className="mt-0.5 text-muted-foreground">
-                {mediaSize(file.size)}
-                {uploadedAttachment.current ? " · Preparado" : " · Será enviado ao confirmar"}
-                {file.type.startsWith("audio/") && " · Envie o texto em uma mensagem separada"}
-              </p>
-            </div>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              aria-label="Remover arquivo selecionado"
-              disabled={sending}
-              onClick={() => {
-                setFile(null);
-                uploadedAttachment.current = null;
-                setSendError(null);
-              }}
-            >
-              <X className="size-4" />
-            </Button>
-          </div>
-        )}
-        <div className="flex items-end gap-2">
-          {connection?.capabilities?.media && (
+        <div className="mb-2 flex gap-1.5 overflow-x-auto" role="group" aria-label="Atalhos do atendimento">
+          <a
+            href="/interno/produtos"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="wa-chip"
+            title="Consulta de produtos (abre em outra aba)"
+          >
+            <PackageSearch aria-hidden="true" />
+            Produtos
+          </a>
+          {opportunity && (
             <>
-              <input
-                ref={uploadInput}
-                className="sr-only"
-                type="file"
-                aria-label="Selecionar anexo"
-                accept="image/jpeg,image/png,image/gif,image/webp,audio/ogg,audio/mpeg,audio/mp4,audio/wav,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/plain"
-                onChange={(event) => {
-                  selectFile(event.target.files?.[0]);
-                  event.target.value = "";
-                }}
-                disabled={!canSendMedia || sending}
-              />
-              <Button
+              <button
                 type="button"
-                size="icon"
-                variant="outline"
-                aria-label="Anexar imagem, áudio ou documento"
-                disabled={!canSendMedia || sending}
-                onClick={() => uploadInput.current?.click()}
+                className="wa-chip"
+                onClick={() => open({ kind: "createProposal", id: opportunity.id })}
               >
-                <Paperclip className="size-4" />
-              </Button>
+                <FileText aria-hidden="true" />
+                Orçamento
+              </button>
+              <button
+                type="button"
+                className="wa-chip"
+                onClick={() => open({ kind: "schedule", id: opportunity.id })}
+              >
+                <CalendarClock aria-hidden="true" />
+                Agendar retorno
+              </button>
             </>
           )}
-          <textarea
-            aria-label="Mensagem ao cliente"
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-            placeholder={canSend ? "Escreva uma resposta…" : "WhatsApp indisponível para envio"}
-            disabled={!canSend || sending}
-            maxLength={4000}
-            rows={2}
-            className="max-h-40 min-h-11 flex-1 resize-y rounded-lg border bg-card p-3 text-sm disabled:opacity-60"
-          />
-          <Button
-            type="submit"
-            disabled={
-              !canSend || (!text.trim() && !file) || sending || Boolean(file && !canSendMedia)
-            }
-            aria-label="Enviar mensagem"
-          >
-            {sending ? <Loader2 className="size-4 animate-spin" /> : <Send />}
-            <span className="hidden sm:inline">Enviar</span>
-          </Button>
         </div>
+        {file && (
+          <ComposerFilePreview
+            file={file}
+            imagePreview={filePreview}
+            prepared={Boolean(uploadedAttachment.current)}
+            disabled={sending}
+            onRemove={() => {
+              setFile(null);
+              uploadedAttachment.current = null;
+              setSendError(null);
+            }}
+          />
+        )}
+        {connection?.capabilities?.media && (
+          <input
+            ref={uploadInput}
+            className="sr-only"
+            type="file"
+            aria-label="Selecionar anexo"
+            accept="image/jpeg,image/png,image/gif,image/webp,audio/ogg,audio/mpeg,audio/mp4,audio/wav,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/plain"
+            onChange={(event) => {
+              selectFile(event.target.files?.[0]);
+              event.target.value = "";
+            }}
+            disabled={!canSendMedia || sending}
+          />
+        )}
+        <ComposerBar
+          text={text}
+          onTextChange={setText}
+          disabled={!canSend || sending}
+          sending={sending}
+          canSubmit={
+            canSend && (Boolean(text.trim()) || Boolean(file)) && !sending && !(file && !canSendMedia)
+          }
+          mediaEnabled={connection?.capabilities?.media === true}
+          canSendMedia={canSendMedia}
+          hasFile={Boolean(file)}
+          placeholder={canSend ? "Mensagem" : "WhatsApp indisponível para envio"}
+          onPickFile={() => uploadInput.current?.click()}
+          onRecorded={(recorded) => selectFile(recorded)}
+          onError={setSendError}
+        />
         {sendError && (
           <p
             role="alert"
-            className="mt-2 rounded-md border border-destructive/30 p-2 text-xs text-destructive"
+            className="mt-2 rounded-md border border-destructive/30 bg-white p-2 text-xs text-destructive"
           >
             {sendError}
           </p>
         )}
+        {/* Conectado: só a dica do teclado (como no WhatsApp). Sem envio: o motivo, em destaque discreto. */}
         <p className="mt-1.5 text-xs text-muted-foreground">
-          {supervisionOnly
-            ? "Supervisão: somente a vendedora responsável responde por este número."
-            : !customer.phone
-              ? "Complete o telefone na ficha do cliente para enviar mensagens."
-              : connection?.connected
-                ? "Envio pelo WhatsApp conectado. O status confirma o andamento no provedor."
-                : connection?.message || "Configure e conecte o WhatsApp para habilitar o envio."}
+          {canSend ? (
+            <span className="hidden md:inline">Enter envia · Shift+Enter quebra a linha</span>
+          ) : supervisionOnly ? (
+            "Supervisão: somente a vendedora responsável responde por este número."
+          ) : !customer.phone ? (
+            "Complete o telefone na ficha do cliente para enviar mensagens."
+          ) : identityNeedsReview ? (
+            "A identificação deste contato precisa de revisão administrativa antes de enviar."
+          ) : (
+            connection?.message || "Configure e conecte o WhatsApp para habilitar o envio."
+          )}
         </p>
-        {connection?.capabilities?.media && (
-          <p className="mt-1 text-[11px] text-muted-foreground">
-            Um arquivo por envio, até 7 MB. Áudio por arquivo; imagem e documento ficam no histórico
-            protegido do CRM.
-          </p>
-        )}
       </form>
     </>
   );
@@ -780,7 +840,7 @@ function ClientCard({ contactId }: { contactId: string }) {
         <div className="min-w-0">
           <p className="font-semibold">{customer.name}</p>
           {customer.company && <p className="truncate text-muted-foreground">{customer.company}</p>}
-          <p className="text-muted-foreground">{customer.phone || "Sem telefone"}</p>
+          <p className="text-muted-foreground">{formatPhone(customer.phone) || "Sem telefone"}</p>
         </div>
       </div>
       <div className="space-y-3">
