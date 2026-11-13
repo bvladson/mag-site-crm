@@ -62,6 +62,12 @@ export default {
           .catch(() => {
             crmWorkerStarted = false;
           });
+        // Automações internas: rodada a cada 10 min, só com o interruptor geral ligado (começa desligado).
+        void import("./lib/crm-automacoes.server")
+          .then((automacoes) => automacoes.startAutomationWorker())
+          .catch(() => {
+            crmWorkerStarted = false;
+          });
       }
       const response = await handler.fetch(request, env, ctx);
       return await normalizeCatastrophicSsrResponse(response);

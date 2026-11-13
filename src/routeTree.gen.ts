@@ -48,6 +48,7 @@ import { Route as AuthenticatedInternoIndexRouteImport } from './routes/_authent
 import { Route as AuthenticatedInternoAdminRouteImport } from './routes/_authenticated/interno.admin'
 import { Route as AuthenticatedInternoAtribuicaoRouteImport } from './routes/_authenticated/interno.atribuicao'
 import { Route as AuthenticatedInternoAuditoriaRouteImport } from './routes/_authenticated/interno.auditoria'
+import { Route as AuthenticatedInternoAutomacoesRouteImport } from './routes/_authenticated/interno.automacoes'
 import { Route as AuthenticatedInternoCampanhasRouteImport } from './routes/_authenticated/interno.campanhas'
 import { Route as AuthenticatedInternoContaRouteImport } from './routes/_authenticated/interno.conta'
 import { Route as AuthenticatedInternoConteudoRouteImport } from './routes/_authenticated/interno.conteudo'
@@ -289,6 +290,12 @@ const AuthenticatedInternoAuditoriaRoute =
   AuthenticatedInternoAuditoriaRouteImport.update({
     id: '/auditoria',
     path: '/auditoria',
+    getParentRoute: () => AuthenticatedInternoRoute,
+  } as any)
+const AuthenticatedInternoAutomacoesRoute =
+  AuthenticatedInternoAutomacoesRouteImport.update({
+    id: '/automacoes',
+    path: '/automacoes',
     getParentRoute: () => AuthenticatedInternoRoute,
   } as any)
 const AuthenticatedInternoCampanhasRoute =
@@ -579,6 +586,7 @@ export interface FileRoutesByFullPath {
   '/interno/admin': typeof AuthenticatedInternoAdminRoute
   '/interno/atribuicao': typeof AuthenticatedInternoAtribuicaoRoute
   '/interno/auditoria': typeof AuthenticatedInternoAuditoriaRoute
+  '/interno/automacoes': typeof AuthenticatedInternoAutomacoesRoute
   '/interno/campanhas': typeof AuthenticatedInternoCampanhasRoute
   '/interno/conta': typeof AuthenticatedInternoContaRoute
   '/interno/conteudo': typeof AuthenticatedInternoConteudoRoute
@@ -661,6 +669,7 @@ export interface FileRoutesByTo {
   '/interno/admin': typeof AuthenticatedInternoAdminRoute
   '/interno/atribuicao': typeof AuthenticatedInternoAtribuicaoRoute
   '/interno/auditoria': typeof AuthenticatedInternoAuditoriaRoute
+  '/interno/automacoes': typeof AuthenticatedInternoAutomacoesRoute
   '/interno/campanhas': typeof AuthenticatedInternoCampanhasRoute
   '/interno/conta': typeof AuthenticatedInternoContaRoute
   '/interno/conteudo': typeof AuthenticatedInternoConteudoRoute
@@ -745,6 +754,7 @@ export interface FileRoutesById {
   '/_authenticated/interno/admin': typeof AuthenticatedInternoAdminRoute
   '/_authenticated/interno/atribuicao': typeof AuthenticatedInternoAtribuicaoRoute
   '/_authenticated/interno/auditoria': typeof AuthenticatedInternoAuditoriaRoute
+  '/_authenticated/interno/automacoes': typeof AuthenticatedInternoAutomacoesRoute
   '/_authenticated/interno/campanhas': typeof AuthenticatedInternoCampanhasRoute
   '/_authenticated/interno/conta': typeof AuthenticatedInternoContaRoute
   '/_authenticated/interno/conteudo': typeof AuthenticatedInternoConteudoRoute
@@ -830,6 +840,7 @@ export interface FileRouteTypes {
     | '/interno/admin'
     | '/interno/atribuicao'
     | '/interno/auditoria'
+    | '/interno/automacoes'
     | '/interno/campanhas'
     | '/interno/conta'
     | '/interno/conteudo'
@@ -912,6 +923,7 @@ export interface FileRouteTypes {
     | '/interno/admin'
     | '/interno/atribuicao'
     | '/interno/auditoria'
+    | '/interno/automacoes'
     | '/interno/campanhas'
     | '/interno/conta'
     | '/interno/conteudo'
@@ -995,6 +1007,7 @@ export interface FileRouteTypes {
     | '/_authenticated/interno/admin'
     | '/_authenticated/interno/atribuicao'
     | '/_authenticated/interno/auditoria'
+    | '/_authenticated/interno/automacoes'
     | '/_authenticated/interno/campanhas'
     | '/_authenticated/interno/conta'
     | '/_authenticated/interno/conteudo'
@@ -1363,6 +1376,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedInternoAuditoriaRouteImport
       parentRoute: typeof AuthenticatedInternoRoute
     }
+    '/_authenticated/interno/automacoes': {
+      id: '/_authenticated/interno/automacoes'
+      path: '/automacoes'
+      fullPath: '/interno/automacoes'
+      preLoaderRoute: typeof AuthenticatedInternoAutomacoesRouteImport
+      parentRoute: typeof AuthenticatedInternoRoute
+    }
     '/_authenticated/interno/campanhas': {
       id: '/_authenticated/interno/campanhas'
       path: '/campanhas'
@@ -1698,6 +1718,7 @@ interface AuthenticatedInternoRouteChildren {
   AuthenticatedInternoAdminRoute: typeof AuthenticatedInternoAdminRoute
   AuthenticatedInternoAtribuicaoRoute: typeof AuthenticatedInternoAtribuicaoRoute
   AuthenticatedInternoAuditoriaRoute: typeof AuthenticatedInternoAuditoriaRoute
+  AuthenticatedInternoAutomacoesRoute: typeof AuthenticatedInternoAutomacoesRoute
   AuthenticatedInternoCampanhasRoute: typeof AuthenticatedInternoCampanhasRoute
   AuthenticatedInternoContaRoute: typeof AuthenticatedInternoContaRoute
   AuthenticatedInternoConteudoRoute: typeof AuthenticatedInternoConteudoRoute
@@ -1731,6 +1752,7 @@ const AuthenticatedInternoRouteChildren: AuthenticatedInternoRouteChildren = {
   AuthenticatedInternoAdminRoute: AuthenticatedInternoAdminRoute,
   AuthenticatedInternoAtribuicaoRoute: AuthenticatedInternoAtribuicaoRoute,
   AuthenticatedInternoAuditoriaRoute: AuthenticatedInternoAuditoriaRoute,
+  AuthenticatedInternoAutomacoesRoute: AuthenticatedInternoAutomacoesRoute,
   AuthenticatedInternoCampanhasRoute: AuthenticatedInternoCampanhasRoute,
   AuthenticatedInternoContaRoute: AuthenticatedInternoContaRoute,
   AuthenticatedInternoConteudoRoute: AuthenticatedInternoConteudoRoute,
