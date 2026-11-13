@@ -1,0 +1,11 @@
+# Apply only to an approved deployment. Never attach the production web during Stage 1.
+services:
+  web:
+    networks:
+      default: {}
+      whatsapp: {}
+
+networks:
+  whatsapp:
+    external: true
+    name: ${WAHA_NETWORK_NAME:-mag-whatsapp}

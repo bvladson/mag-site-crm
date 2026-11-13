@@ -1,0 +1,22 @@
+# Projeto mag-site — catálogo do site institucional a partir do Omie.
+# Horários de Fortaleza (a VPS está em America/Fortaleza).
+# 04:00 sincronização diária (janela livre: backups terminam 03:17, BIomie começa 04:20).
+# 06:40 reserva: só consulta o Omie se a das 04:00 não deu certo (última boa com mais de 20 h);
+#       se a reserva também falhar, omie-alert.py avisa no Telegram (secrets/alert.env).
+# :17 de hora em hora, fora de 04–06 h (janela da principal e da reserva): alerta se o último sync
+#       válido tem mais de 26 h. Tudo silencioso quando está bem.
+# 23:58 resumo do dia das violações de CSP (modo só relatório): contagens em /var/log/mag-site-csp.log.
+# :25 de hora em hora: redes sociais (bin/social-sync.sh); sem credencial não chama nada. Log /var/log/mag-site-social.log.
+# 05:20 cadastro completo do Omie para a Consulta rápida do painel (bin/omie-indice.sh; só metadados, ~16 chamadas;
+#       nunca bloqueia a sincronização pública). Log /var/log/mag-site-omie-indice.log.
+# 05:40 dados do Omie do Pedido de Venda (bin/omie-referencias.sh: vendedores, etapas, formas de pagamento, categorias e
+#       contas; só leitura, ~6 chamadas). Log /var/log/mag-site-omie-referencias.log.
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+0 4 * * * root /opt/mag-site/bin/omie-sync.sh
+20 5 * * * root /opt/mag-site/bin/omie-indice.sh
+40 5 * * * root /opt/mag-site/bin/omie-referencias.sh
+40 6 * * * root /opt/mag-site/bin/omie-sync.sh --if-stale-hours=20
+17 0-3,7-23 * * * root /opt/mag-site/bin/omie-alert.py atraso >>/var/log/mag-site-omie.log 2>&1
+58 23 * * * root /opt/mag-site/bin/csp-resumo.sh 24 >>/var/log/mag-site-csp.log 2>&1
+25 * * * * root /opt/mag-site/bin/social-sync.sh

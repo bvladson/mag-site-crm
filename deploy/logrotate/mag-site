@@ -1,0 +1,12 @@
+# Projeto mag-site — logs da sincronização Omie, do cadastro completo (Consulta rápida), das redes sociais e do resumo
+# diário da CSP (mesma política dos logs de backup da VPS).
+/var/log/mag-site-omie.log /var/log/mag-site-omie-indice.log /var/log/mag-site-omie-referencias.log /var/log/mag-site-social.log /var/log/mag-site-csp.log {
+    su root adm
+    monthly
+    rotate 6
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root adm
+}

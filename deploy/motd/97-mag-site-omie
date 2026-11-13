@@ -1,0 +1,6 @@
+#!/bin/sh
+# Projeto mag-site — avisa no login SSH quando a última sincronização do catálogo Omie falhou.
+FALHA=/var/lib/mag-site/omie-sync.falha
+[ -s "$FALHA" ] || exit 0
+printf '\033[1;31m[mag-site] %s\033[0m\n' "$(head -c 300 "$FALHA")"
+printf '         Rodar de novo: /opt/mag-site/bin/omie-sync.sh  (o site mantém o último catálogo bom)\n'

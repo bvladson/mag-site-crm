@@ -1,0 +1,63 @@
+# Projeto mag-cms — WordPress editorial em cms.magmoveiscorporativos.com.br. MODELO, ainda não instalado (ver README.md).
+# Container em 127.0.0.1:3030. Certificado próprio via webroot (/var/www/letsencrypt). Fora dos buscadores.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name cms.magmoveiscorporativos.com.br;
+    access_log /var/log/nginx/mag-cms-access.log;
+    error_log /var/log/nginx/mag-cms-error.log;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+    location / {
+        return 301 https://cms.magmoveiscorporativos.com.br$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name cms.magmoveiscorporativos.com.br;
+    ssl_certificate /etc/letsencrypt/live/cms.magmoveiscorporativos.com.br/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/cms.magmoveiscorporativos.com.br/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+    access_log /var/log/nginx/mag-cms-access.log;
+    error_log /var/log/nginx/mag-cms-error.log;
+
+    client_max_body_size 32m;
+
+    # Nunca indexar o CMS (vale para toda resposta, inclusive erros e arquivos enviados).
+    add_header X-Robots-Tag "noindex, nofollow, noarchive" always;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+
+    location = /robots.txt {
+        default_type text/plain;
+        return 200 "User-agent: *\nDisallow: /\n";
+    }
+    # Superfícies de ataque que o uso editorial não precisa.
+    location = /xmlrpc.php { return 403; }
+    location ~* ^/wp-content/uploads/.*\.(php|phtml|phar)$ { return 403; }
+    location ~* (^|/)(readme\.html|license\.txt|wp-config\.php.*|\.user\.ini)$ { return 403; }
+    location ~ /\.(?!well-known/) { return 403; }
+
+    location = /wp-login.php {
+        limit_req zone=mag_cms_login burst=5 nodelay;
+        limit_req_status 429;
+        proxy_pass http://127.0.0.1:3030;
+        include /etc/nginx/proxy_params;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3030;
+        include /etc/nginx/proxy_params;
+        proxy_read_timeout 120s;
+    }
+}

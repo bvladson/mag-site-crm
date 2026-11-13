@@ -1,0 +1,66 @@
+name: ${WAHA_PROJECT_NAME:-mag-waha}
+
+services:
+  waha:
+    image: devlikeapro/waha:noweb-2026.10.1@sha256:0d64cce14a922f61bb9a620474086d1f5695f2522e7e1088704e6eca3a085d0c
+    user: "65532:65532"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    env_file:
+      - path: ./secrets/waha.env
+        required: true
+    environment:
+      WHATSAPP_DEFAULT_ENGINE: NOWEB
+      WAHA_DASHBOARD_ENABLED: "false"
+      WHATSAPP_SWAGGER_ENABLED: "false"
+      WHATSAPP_FILES_LIFETIME: "86400"
+      WHATSAPP_FILES_FOLDER: /app/.media
+      WAHA_PRINT_QR: "false"
+      WAHA_LOG_LEVEL: info
+      NODE_OPTIONS: --max-old-space-size=512
+      HOME: /tmp
+      TZ: America/Fortaleza
+    volumes:
+      - ./data/sessions:/app/.sessions
+      - ./data/media:/app/.media
+    secrets:
+      - source: waha_api_key
+        target: waha_api_key
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    # No host ports. Only explicitly attached MAG backends can reach this API.
+    expose: ["3000"]
+    networks: [whatsapp]
+    mem_limit: 1g
+    cpus: 0.5
+    pids_limit: 192
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "const fs=require('fs');fetch('http://127.0.0.1:3000/health',{headers:{'X-Api-Key':fs.readFileSync('/run/secrets/waha_api_key','utf8').trim()}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      start_period: 45s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  whatsapp:
+    name: ${WAHA_NETWORK_NAME:-mag-whatsapp}
+    driver: bridge
+    # Outbound access is necessary for WhatsApp; no inbound host port is published.
+
+secrets:
+  waha_api_key:
+    file: ./secrets/api-key

@@ -1,0 +1,173 @@
+# Projeto mag-site (site institucional MAG) — instalado em /opt/mag-site/compose.yaml.
+# Variáveis de /opt/mag-site/.env: MAG_SITE_TAG (imagem ativa) e MAG_SITE_UID/GID (usuário "magsite").
+# Nada aqui aponta para recursos de outro projeto da VPS.
+name: mag-site
+
+x-hardening: &hardening
+  user: "${MAG_SITE_UID:?}:${MAG_SITE_GID:?}"
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  web:
+    <<: *hardening
+    image: mag-site:${MAG_SITE_TAG:?}
+    restart: unless-stopped
+    env_file:
+      - path: /opt/mag-site/secrets/site.env
+        required: false
+      # Só os tokens internos do omie-consulta e do omie-pedidos (as chaves do Omie NUNCA entram neste container).
+      - path: /opt/mag-site/secrets/omie-consulta.env
+        required: false
+      - path: /opt/mag-site/secrets/omie-pedidos.env
+        required: false
+    environment:
+      NODE_ENV: production
+      OMIE_CONSULTA_URL: http://omie-consulta:3100
+      OMIE_PEDIDOS_URL: http://omie-pedidos:3200
+      SITE_DATA_DIR: /app/data/local
+      OMIE_CATALOG_PATH: /app/catalog/catalog.json
+      OMIE_IMAGE_DIR: /app/catalog/images
+      # Sincronização diária às 04:00: estoque com mais de 30 h vira "sob consulta".
+      OMIE_STOCK_MAX_AGE_SECONDS: "108000"
+      SITE_TRUST_PROXY: "true"
+      SITE_PUBLIC_ORIGINS: https://magmoveiscorporativos.com.br
+      PANEL_BASE_URL: https://magmoveiscorporativos.com.br
+    ports:
+      - "127.0.0.1:3020:3000"
+    volumes:
+      - /opt/mag-site/data:/app/data/local
+      - /opt/mag-site/catalog:/app/catalog:ro
+    mem_limit: 768m
+    cpus: 0.75
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  # Consulta rápida do painel (/interno/produtos): estoque de 1 produto em todos os locais, SOMENTE LEITURA, sob demanda.
+  # Sempre ligado, sem porta publicada: só o site o alcança (rede interna do projeto) e com o token interno.
+  # Serviço permanente com as chaves do Omie (só leitura); não altera nem substitui o omie-sync noturno.
+  omie-consulta:
+    <<: *hardening
+    image: mag-site:${MAG_SITE_TAG:?}
+    restart: unless-stopped
+    env_file:
+      - path: /opt/mag-site/secrets/omie.env
+        required: true
+      - path: /opt/mag-site/secrets/omie-consulta.env
+        required: true
+    environment:
+      NODE_ENV: production
+      OMIE_CONSULTA_PORT: "3100"
+    command: ["node", "scripts/omie-consulta.mjs"]
+    mem_limit: 128m
+    cpus: 0.25
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/saude').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 60s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+
+  # Orçamento interno aceito → Pedido de Venda no Omie. ÚNICO componente que pode ESCREVER no Omie (IncluirPedido e
+  # IncluirCliente), e só com OMIE_ORDER_WRITE_ENABLED=true no /opt/mag-site/.env (sem a linha = false = só simula).
+  # Nunca fatura, exclui, altera ou mexe em estoque. Sem porta publicada; só o site o chama, com o token interno.
+  omie-pedidos:
+    <<: *hardening
+    image: mag-site:${MAG_SITE_TAG:?}
+    restart: unless-stopped
+    env_file:
+      - path: /opt/mag-site/secrets/omie.env
+        required: true
+      - path: /opt/mag-site/secrets/omie-pedidos.env
+        required: true
+    environment:
+      NODE_ENV: production
+      OMIE_PEDIDOS_PORT: "3200"
+      OMIE_ORDER_WRITE_ENABLED: "${OMIE_ORDER_WRITE_ENABLED:-false}"
+    command: ["node", "scripts/omie-pedidos.mjs"]
+    mem_limit: 128m
+    cpus: 0.25
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3200/saude').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 60s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+
+  # Execução sob demanda (cron do host): docker compose --profile maintenance run --rm omie-sync ...
+  # Credenciais do Omie só aqui, no omie-consulta, no omie-indice (só leem o Omie) e no omie-pedidos (pedido de venda);
+  # este grava o catálogo público.
+  omie-sync:
+    <<: *hardening
+    image: mag-site:${MAG_SITE_TAG:?}
+    profiles: [maintenance]
+    restart: "no"
+    env_file:
+      - path: /opt/mag-site/secrets/omie.env
+        required: true
+    environment:
+      OMIE_CATALOG_PATH: /app/catalog/catalog.json
+      OMIE_STATUS_PATH: /app/catalog/catalog.status.json
+      OMIE_IMAGE_DIR: /app/catalog/images
+      # glibc + libvips (sharp): menos arenas de malloc evita a fragmentação que inflava a memória.
+      MALLOC_ARENA_MAX: "2"
+    command: ["node", "scripts/sync-omie.mjs"]
+    volumes:
+      - /opt/mag-site/catalog:/app/catalog
+    # 02/10/2026: com 512 MB a 1ª sincronização morreu por OOM ao otimizar fotos; roda só de madrugada.
+    mem_limit: 768m
+    cpus: 0.5
+
+  # Cadastro completo do Omie para a Consulta rápida ("Mostrar todos os produtos do Omie"), 05:20 pelo cron do host
+  # (bin/omie-indice.sh). Só metadados (sem estoque, preço ou fotos), ~16 chamadas por noite; não toca no catálogo
+  # público: escreve apenas catalog/interno/ (700 magsite), lido pelo painel.
+  omie-indice:
+    <<: *hardening
+    image: mag-site:${MAG_SITE_TAG:?}
+    profiles: [maintenance]
+    restart: "no"
+    env_file:
+      - path: /opt/mag-site/secrets/omie.env
+        required: true
+    environment:
+      OMIE_CATALOG_PATH: /app/catalog/catalog.json
+      OMIE_INDICE_DIR: /app/catalog/interno
+    command: ["node", "scripts/omie-indice.mjs"]
+    volumes:
+      - /opt/mag-site/catalog/interno:/app/catalog/interno
+    mem_limit: 256m
+    cpus: 0.5
+
+  # Redes sociais, de hora em hora pelo cron do host (bin/social-sync.sh). Credenciais só em secrets/social.env
+  # (opcional: sem ele toda rede fica "desconectado" e nada é chamado). Escreve apenas catalog/social/ (lido pelo
+  # site) e social-state/ (tokens que as plataformas renovam, 700 magsite); o resto do catálogo nem é montado.
+  social-sync:
+    <<: *hardening
+    image: mag-site:${MAG_SITE_TAG:?}
+    profiles: [maintenance]
+    restart: "no"
+    env_file:
+      - path: /opt/mag-site/secrets/social.env
+        required: false
+    environment:
+      SOCIAL_OUTPUT_DIR: /app/catalog/social
+      SOCIAL_STATE_DIR: /app/social-state
+      MALLOC_ARENA_MAX: "2"
+    command: ["node", "scripts/sync-social.mjs"]
+    volumes:
+      - /opt/mag-site/catalog/social:/app/catalog/social
+      - /opt/mag-site/social-state:/app/social-state
+    mem_limit: 384m
+    cpus: 0.5

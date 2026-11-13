@@ -1,0 +1,100 @@
+# Projeto mag-site — site institucional MAG (ver /srv/mag-site/MANIFESTO.md).
+# Container em 127.0.0.1:3020. Certificado via webroot (/var/www/letsencrypt).
+# nginx 1.24: http2 é parâmetro do listen e já vem habilitado na socket 443 por outro bloco.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name magmoveiscorporativos.com.br www.magmoveiscorporativos.com.br;
+    access_log /var/log/nginx/mag-site-access.log;
+    error_log /var/log/nginx/mag-site-error.log;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+    location / {
+        return 301 https://magmoveiscorporativos.com.br$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name www.magmoveiscorporativos.com.br;
+    ssl_certificate /etc/letsencrypt/live/magmoveiscorporativos.com.br/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/magmoveiscorporativos.com.br/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+    access_log /var/log/nginx/mag-site-access.log;
+    error_log /var/log/nginx/mag-site-error.log;
+    return 301 https://magmoveiscorporativos.com.br$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name magmoveiscorporativos.com.br;
+    ssl_certificate /etc/letsencrypt/live/magmoveiscorporativos.com.br/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/magmoveiscorporativos.com.br/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+    access_log /var/log/nginx/mag-site-access.log;
+    error_log /var/log/nginx/mag-site-error.log;
+
+    # Currículo em PDF até 5 MB (base64 no corpo da requisição).
+    client_max_body_size 8m;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+    # CSP só em modo RELATÓRIO: não bloqueia nada. Base = recursos realmente usados (o próprio domínio + Google Fonts;
+    # mapeado em 05/10/2026: 0 violações em 17 páginas, desktop e celular). Violações → /api/csp-report (log do
+    # container, linhas "[csp]"). Antes de virar Content-Security-Policy (bloqueando), ver MANIFESTO → "CSP".
+    # frame-src: só o player do YouTube sem cookies (/redes e home), carregado ao clicar e com consentimento de marketing.
+    add_header Content-Security-Policy-Report-Only "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' blob: data:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-src 'self' https://www.youtube-nocookie.com; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; manifest-src 'self'; worker-src 'self'; report-uri /api/csp-report; report-to csp" always;
+    add_header Reporting-Endpoints 'csp="https://magmoveiscorporativos.com.br/api/csp-report"' always;
+
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_min_length 1024;
+    gzip_types text/css application/javascript text/javascript application/json image/svg+xml application/xml text/xml text/plain;
+
+    # Endereços do WordPress antigo e do spam injetado nele (mapas em /etc/nginx/conf.d/mag-site.conf).
+    if ($mag_site_legacy) { return 301 $mag_site_legacy; }
+    # Resposta 410 direto aqui: um error_page interno reaproveitaria o valor do mapa e cairia na página padrão do nginx.
+    default_type "text/html; charset=utf-8";
+    if ($mag_site_gone) { return 410 '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Página removida — MAG Móveis Corporativos</title></head><body style="margin:0;font-family:system-ui,sans-serif;background:#fafafa;color:#222"><main style="max-width:36rem;margin:12vh auto;padding:0 1.5rem;text-align:center"><h1 style="font-size:1.6rem">Esta página não existe mais.</h1><p style="color:#666">O site da MAG Móveis Corporativos foi renovado.</p><p><a href="/" style="color:#a51c24">Ir para o início</a> · <a href="/produtos" style="color:#a51c24">Ver produtos</a> · <a href="/contato" style="color:#a51c24">Falar com a MAG</a></p></main></body></html>'; }
+    # URL técnica antiga com barra (/produto/produto-<id>/): tira a barra internamente, sem redirecionar,
+    # e o site responde um 301 só, direto para a URL amigável.
+    rewrite ^/(produto/produto-[0-9]+)/$ /$1 last;
+    # Barra final → endereço sem barra, permanente e num salto só (antes o site respondia 307).
+    rewrite ^/links$ /links/ permanent;
+    rewrite ^/(?!links/$)(.+)/$ /$1 permanent;
+
+    # Healthcheck só para a própria VPS (o container também é verificado direto na 3020).
+    location = /api/health {
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
+        proxy_pass http://127.0.0.1:3020;
+        proxy_set_header Host $host;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3020;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        # Sobrescreve (não acumula) o IP do visitante: o limitador de tentativas confia só nele.
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 60s;
+    }
+}

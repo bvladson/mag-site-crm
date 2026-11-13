@@ -1,0 +1,168 @@
+.mag-crm {
+  --background: #f5f7fc;
+  --surface: #f1f3f8;
+  --foreground: #153043;
+  --card: #fff;
+  --muted: #eef0f4;
+  --muted-foreground: #69768d;
+  --border: #e3e6ec;
+  --input: #d6dae2;
+  --crm-info: #3568c2;
+  --crm-info-soft: #e5eeff;
+  --crm-warning: #93600c;
+  --crm-warning-soft: #fff5e4;
+  --crm-success: #247044;
+  --crm-success-soft: #edf7f1;
+  color: var(--foreground);
+  min-width: 0;
+}
+.mag-crm-workspace {
+  margin: -1rem;
+  background: var(--background);
+  min-height: 70vh;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  overflow: clip;
+}
+.mag-crm-nav {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+  background: white;
+  padding: 0.7rem 1rem;
+}
+.mag-crm-nav a {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 0.5rem;
+  color: var(--muted-foreground);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.mag-crm-nav a[aria-current="page"] {
+  color: var(--primary);
+  background: color-mix(in oklab, var(--primary) 8%, white);
+}
+.mag-crm-nav a:hover {
+  background: var(--surface);
+}
+.mag-crm-nav svg {
+  width: 1rem;
+  height: 1rem;
+}
+.mag-crm .crm-info {
+  color: var(--crm-info);
+  background: var(--crm-info-soft);
+}
+.mag-crm .crm-warning {
+  color: var(--crm-warning);
+  background: var(--crm-warning-soft);
+}
+.mag-crm .crm-success {
+  color: var(--crm-success);
+  background: var(--crm-success-soft);
+}
+.mag-crm .crm-brand {
+  color: var(--primary);
+  background: color-mix(in oklab, var(--primary) 8%, white);
+}
+.mag-crm .crm-card {
+  box-shadow: 0 1px 3px rgb(21 48 67 / 0.06);
+}
+.mag-crm .crm-card:hover {
+  box-shadow: 0 5px 16px -8px rgb(21 48 67 / 0.24);
+}
+.mag-crm .crm-opportunity {
+  cursor: pointer;
+  transition:
+    box-shadow 0.15s,
+    transform 0.15s;
+}
+.mag-crm .crm-opportunity:hover {
+  transform: translateY(-2px);
+}
+.mag-crm button {
+  touch-action: manipulation;
+}
+.mag-crm :is(p, li, h1, h2, h3, dd) {
+  overflow-wrap: anywhere;
+}
+.mag-crm .crm-inbox {
+  min-height: 36rem;
+  height: min(48rem, calc(100dvh - 12rem));
+}
+.mag-crm .crm-panel {
+  background: var(--card);
+}
+.mag-crm .crm-bubble-out {
+  background: #f9ecec;
+}
+.mag-crm .crm-tab {
+  border-radius: 0.4rem;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+.mag-crm .crm-tab[aria-pressed="true"] {
+  color: var(--primary);
+  background: color-mix(in oklab, var(--primary) 8%, white);
+}
+.mag-crm-dialog {
+  max-height: calc(100dvh - 2rem);
+  overflow-y: auto;
+}
+.mag-crm .crm-timeline {
+  position: relative;
+  border-left: 1px solid var(--border);
+  margin-left: 0.85rem;
+  padding-left: 1.5rem;
+}
+.mag-crm .crm-timeline-icon {
+  position: absolute;
+  left: -2.4rem;
+  width: 1.75rem;
+  height: 1.75rem;
+  display: grid;
+  place-items: center;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+}
+@media (min-width: 768px) {
+  .mag-crm-workspace {
+    margin: -0.5rem;
+  }
+}
+@media (max-width: 639px) {
+  .mag-crm-workspace {
+    margin: -0.5rem;
+    border-radius: 0.75rem;
+  }
+  .mag-crm-nav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding: 0.5rem;
+  }
+  .mag-crm-nav a {
+    flex-shrink: 0;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.45rem 0.65rem;
+    font-size: 0.7rem;
+  }
+  .mag-crm .crm-inbox {
+    height: calc(100dvh - 12rem);
+    min-height: 26rem;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mag-crm .crm-opportunity {
+    transition: none;
+  }
+  .mag-crm .crm-opportunity:hover {
+    transform: none;
+  }
+}

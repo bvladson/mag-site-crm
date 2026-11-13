@@ -1,0 +1,62 @@
+# Projeto mag-cms (WordPress editorial, headless) — MODELO, ainda não instalado. Ver README.md.
+# Instalado em /opt/mag-cms/compose.yaml. Segredos em /opt/mag-cms/secrets/*.env (gerados na instalação, root 600).
+# Nada aqui aponta para recursos de outro projeto da VPS; nada vem do WordPress antigo do domínio.
+name: mag-cms
+
+x-logs: &logs
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  db:
+    <<: *logs
+    image: mariadb:11.4          # série LTS; atualizar com "docker compose pull" (correções 11.4.x)
+    restart: unless-stopped
+    env_file: /opt/mag-cms/secrets/db.env
+    volumes:
+      - /opt/mag-cms/db:/var/lib/mysql
+    networks: [interna]          # sem porta publicada: só o WordPress fala com o banco
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  wordpress:
+    <<: *logs
+    # Fixar na instalação a tag estável vigente (ex.: wordpress:6.x.y-php8.3-apache). O núcleo se atualiza
+    # sozinho no volume (versões de segurança); a imagem só traz PHP/Apache.
+    image: wordpress:php8.3-apache
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: /opt/mag-cms/secrets/wp.env
+    environment:
+      WORDPRESS_CONFIG_EXTRA: |
+        define('DISALLOW_FILE_EDIT', true);
+        define('WP_AUTO_UPDATE_CORE', 'minor');
+        define('FORCE_SSL_ADMIN', true);
+        define('WP_POST_REVISIONS', 30);
+        define('WP_ENVIRONMENT_TYPE', 'production');
+        if (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https') { $_SERVER['HTTPS'] = 'on'; }
+    ports:
+      - "127.0.0.1:3030:80"
+    volumes:
+      - /opt/mag-cms/wordpress:/var/www/html
+    networks: [interna, saida]   # "saida": atualizações automáticas e a API para o site
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 0.5
+
+networks:
+  interna:
+    internal: true
+  saida: {}

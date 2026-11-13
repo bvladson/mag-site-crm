@@ -1,0 +1,17 @@
+.git
+.env
+.env.*
+node_modules
+.output
+.tanstack
+.nitro
+.lovable
+secrets
+data
+catalog-cache
+*.sqlite*
+*.log
+*.tar.gz
+tests
+deploy
+.local-data

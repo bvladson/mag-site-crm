@@ -1,0 +1,19 @@
+{
+ "versao": 3, "numero": "MAG-Q-2026-00009", "geradaEm": "2026-10-08T16:32:43.673Z",
+ "emitente": { "nomeComercial": "MAG Móveis Corporativos", "razaoSocial": "MAGAZINE DOS MOVEIS LTDA", "cnpj": "26.537.584/0003-94",
+   "endereco": "Travessa Sargento Portugal, 64, Aerolândia, Fortaleza – CE, CEP 60850-520", "telefone": "(85) 3122-0506", "whatsapp": "(85) 99861-0074",
+   "email": "diretoria@magmoveiscorporativos.com.br", "site": "magmoveiscorporativos.com.br", "rodape": "", "validadeDias": 7 },
+ "cliente": { "empresa": "CLIENTE FICTICIO LTDA", "fantasia": "Cliente Fictício", "contato": "Fulana", "documento": "11.222.333/0001-81", "cidade": "Fortaleza", "uf": "CE",
+   "email": "compras@exemplo.com.br", "telefone": "(85) 98888-7777" },
+ "consultor": { "nome": "Mateus Oliveira", "email": "mateus@example.com" },
+ "itens": [
+  { "posicao": 1, "produtoId": "8766036921", "sku": "PRD383886079713765", "nome": "CADEIRA EXECUTIVA POP", "unidade": "UN", "quantidade": 2, "precoCentavos": 48000,
+    "brutoCentavos": 96000, "descontoCentavos": 0, "descontoRotulo": null, "totalCentavos": 96000, "prontaEntrega": true, "foto": "/catalog-images/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-p.webp" },
+  { "posicao": 2, "produtoId": "8764749209", "sku": "00003", "nome": "ARMARIO ALTO FEC 2 P 30MM ALMERIA", "unidade": "UN", "quantidade": 1, "precoCentavos": 150000,
+    "brutoCentavos": 150000, "descontoCentavos": 15000, "descontoRotulo": "10%", "totalCentavos": 135000, "prontaEntrega": false, "foto": null }
+ ],
+ "totais": { "brutoCentavos": 246000, "descontoItensCentavos": 15000, "subtotalCentavos": 231000, "descontoGeralCentavos": 0, "freteCentavos": 12000, "montagemCentavos": 0, "totalCentavos": 243000 },
+ "condicoes": { "pagamento": "6 Parcelas", "previsao": "2026-10-20", "validade": "2026-10-15" },
+ "observacoes": "Entrega no térreo.",
+ "opcoes": { "mostrarSku": true }
+}

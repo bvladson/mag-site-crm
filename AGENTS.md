@@ -1,0 +1,29 @@
+<!-- LOVABLE:BEGIN -->
+> [!IMPORTANT]
+> This project is connected to [Lovable](https://lovable.dev). Avoid rewriting
+> published git history — force pushing, or rebasing/amending/squashing commits
+> that are already pushed — as it rewrites history on Lovable's side and the
+> user will likely lose their project history.
+>
+> Commits you push to the connected branch sync back to Lovable and show up in
+> the editor, so keep the branch in a working state.
+<!-- LOVABLE:END -->
+
+- Product/stock reads go through `src/lib/omie.ts`; mock data lives only in `src/data/catalog.ts` — keeps the future Omie swap isolated.
+- Brand identity and general contacts live in `src/config/site.ts`; store addresses and contacts use the site's own `site_units` registry (`src/lib/units.*`). Public reads expose only active stores. Proposal issuer data remains an explicit administrative setting, independent of store selection.
+- Leads (orçamentos, candidaturas) are written only by server functions in `src/lib/leads.functions.ts` to the site's isolated SQLite database. Private reads and writes require a session and server authorization; do not introduce a second Supabase/Lovable database.
+- Demo content (cases, jobs, social posts) renders only when `VITE_SHOW_DEMO=true`; empty lists hide their sections — public site never shows placeholders.
+- Product search lives in `src/lib/search.ts` (client fuzzy); swap for server-side trigram search when the catalog moves to the database.
+- Product galleries use only `product.images` of that SKU — never borrow images from other products.
+- Internal UI belongs under `/interno`; its theme is scoped by `body[data-mag-internal]`. Preserve public styles and existing route URLs. Account roles are cumulative and come from the database, never a client profile selector.
+- Link-tree campaigns share the existing draft/revision/publication workflow. Preserve sellers, store links, private draft images, historical publications and the permanent `/links/` QR. Schedule dates use Fortaleza time.
+- Link-tree v2 presentation is managed by `LinkTreeContent.presentation` and item `icon`, with defaults on read for legacy snapshots. Keep the provided design scoped to `.links-page`, preserve the existing loader and IDs, and use the protected `/links/preview` route for real mobile/desktop previews. Never replace live data with the prototype's sample document.
+- The site's own CMS lives at `/interno/conteudo`, with `site_content_*` tables and private `data/site-uploads` media. Public pages read only the latest immutable publication, while `/site-preview` requires an active administrator. Keep defaults in `site-content.ts`; never mutate the shared `site` configuration or silently change proposal issuer data. Include CMS media in backup and restore.
+- Commercial calculations and PDF versions use the existing server rules. A printed preview must read the same protected PDF/version as downloading. Omie order writing remains controlled by its existing environment flag.
+- CRM lives under `/interno/crm` and uses additive `crm_*` tables in the site's database. Never import prototype seeds/localStorage, invent message delivery, or change a proposal/Omie state by moving a CRM card. Contacts and opportunities use server-enforced portfolios; historical site leads are imported explicitly and idempotently. Keep proposal creation on the existing commercial engine.
+- CRM channel secrets and pending webhook payloads are encrypted with `data/security/crm-integrations.key`; include that key in the private database backup. Webhooks must authenticate before durable ingestion. Preserve external IDs, message receipt ordering, retry guards and uncertain outbound states; a timeout must never automatically resend a WhatsApp message.
+- WAHA is an optional backend connector for the existing CRM, pinned in `deploy/waha/compose.yaml`. Keep its encrypted config/events/outbox separate from legacy integrations and preserve `data/security/crm-waha.key` plus private `data/crm-media` in backups. Require an active configured owner and allowed test number before session operations. Never pair the primary MAG number or deploy this integration without explicit authorization. History imports must not open opportunities or revive unread/commercial tasks; ambiguous conversation context requires an explicit choice of an open opportunity belonging to the contact. See `deploy/waha/README.md`.
+- WAHA NOWEB (real payloads, homologated 06/11/2026): sends return `{ key: { id } }`; echoes and phone-typed messages have no `to` (take the chat from the serialized id); ACKs and inbound may address the chat by `@lid` with `_data.key.remoteJidAlt`; the store lists chats as `@s.whatsapp.net`. Keep the stable message id `<fromMe>_<messageId>` (never the chat-dependent serialized id) and cover new shapes in `tests/waha-noweb.test.mjs`.
+- Brazilian mobiles: store contacts with the 9th digit (`normalizeBrPhone`) and match both spellings (`brPhoneVariants`/`samePhone`); WhatsApp may register the line without it, so resolve the recipient with `check-exists` before sending. Never rewrite existing contact phones in bulk.
+- Decisions of 06/11/2026: only the configured seller replies through WAHA (`allowAdminReplies` off by default; administrators supervise); history is fetched per selected conversation (`allowFullHistoryImport` off by default). The definitive number is authorized separately; never reuse the homologation (marketing) number.
+- MFA secrets require `data/security/mfa.key` in the private backup along with SQLite. Invite tokens use a URL fragment and are delivered manually; tokens and recovery codes must not appear in logs.

@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /interno
+Disallow: /api/
+
+Sitemap: https://magmoveiscorporativos.com.br/sitemap.xml
