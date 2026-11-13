@@ -14,31 +14,53 @@ import { audit, dataDirectory, getDb } from "./local-db.server.ts";
 import { requireActiveUser, type SiteUser } from "./local-auth-core.server.ts";
 import { ensureCrmSchema, requireCrmContact, updateCrmMessageStatus } from "./crm.server.ts";
 import { samePhone } from "./br-phone.ts";
+import { site } from "../config/site.ts";
+import { readPublicSiteContent } from "./site-content.server.ts";
 
 type Row = Record<string, any>;
-type WahaConfig = {
+/** Connector settings shared by every line: one WAHA, one webhook and one HMAC key. */
+type WahaSettings = {
   enabled: boolean;
   baseUrl: string;
+  apiKey: string;
+  hmacKey: string;
+  /** Import every conversation of a number at once. Off by default: history is per selected conversation. */
+  allowFullHistoryImport: boolean;
+  /** Administrators supervise; replying through a seller's number needs this explicit setting. */
+  allowAdminReplies: boolean;
+  /** Numbers that can never be paired, besides MAG's official WhatsApp published on the site. */
+  blockedPhones: string[];
+  /** Release v1 (a single number). Kept as stored for rollback and migrated once into crm_waha_lines. */
+  session?: string;
+  ownerId?: string;
+  expectedPhone?: string;
+};
+/** One seller's WhatsApp: its own WAHA session, the seller who answers and the authorized number. */
+type WahaLine = {
+  id: string;
+  userId: string;
+  session: string;
+  expectedPhone: string;
+  status: "active" | "disabled";
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+};
+/** What a WAHA call needs: the shared settings plus one line. Never stored. */
+type WahaConfig = WahaSettings & {
+  lineId: string;
   session: string;
   ownerId: string;
   expectedPhone: string;
-  apiKey: string;
-  hmacKey: string;
-  /** Import every conversation of the number at once. Off by default: history is per selected conversation. */
-  allowFullHistoryImport: boolean;
-  /** Administrators supervise; replying through the seller's number needs this explicit setting. */
-  allowAdminReplies: boolean;
 };
-const defaults = (): WahaConfig => ({
+const defaults = (): WahaSettings => ({
   enabled: false,
   baseUrl: "http://waha:3000",
-  session: "mag-teste",
-  ownerId: "",
-  expectedPhone: "",
   apiKey: "",
   hmacKey: "",
   allowFullHistoryImport: false,
   allowAdminReplies: false,
+  blockedPhones: [],
 });
 const now = () => new Date().toISOString();
 const txt = (value: unknown, max = 500) =>
@@ -50,6 +72,7 @@ const phone = (value: unknown) => {
   const valueDigits = digits(value);
   return valueDigits.length === 10 || valueDigits.length === 11 ? `55${valueDigits}` : valueDigits;
 };
+const SESSION_NAME = /^[a-zA-Z0-9_-]{1,54}$/;
 /**
  * WAHA serializes message ids as `<fromMe>_<chat>_<messageId>`. With NOWEB the chat part can be the
  * phone (`55...@c.us`) in one event and the LID (`...@lid`) in the next (sends, echoes and ACKs), so the
@@ -82,6 +105,7 @@ function isSystemMessage(payload: any) {
 }
 const administrator = (actor: SiteUser) => requireActiveUser(actor, ["admin"]);
 const commercial = (actor: SiteUser) => requireActiveUser(actor, ["admin", "comercial"]);
+const isAdmin = (user: SiteUser) => user.roles.includes("admin");
 const privateHeaders = {
   "Cache-Control": "private, no-store",
   "X-Robots-Tag": "noindex, nofollow",
@@ -89,6 +113,7 @@ const privateHeaders = {
 const MAX_MEDIA = 7 * 1024 * 1024;
 const MAX_EVENT = 512 * 1024;
 let initialized = new WeakSet<object>();
+const migrated = new WeakSet<object>();
 let savepoint = 0;
 function atomic<T>(work: () => T): T {
   const db = getDb(),
@@ -114,7 +139,23 @@ export function ensureWahaSchema() {
     CREATE TABLE IF NOT EXISTS crm_waha_history(session TEXT NOT NULL,chat_id TEXT NOT NULL,offset INTEGER NOT NULL DEFAULT 0,processed INTEGER NOT NULL DEFAULT 0,completed INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(session,chat_id));
     CREATE TABLE IF NOT EXISTS crm_waha_history_scan(session TEXT PRIMARY KEY,offset INTEGER NOT NULL DEFAULT 0,completed INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS crm_waha_history_window(session TEXT NOT NULL,chat_id TEXT NOT NULL,until_timestamp INTEGER NOT NULL,PRIMARY KEY(session,chat_id));
-    CREATE TABLE IF NOT EXISTS crm_waha_runtime(session TEXT PRIMARY KEY,state TEXT NOT NULL,updated_at TEXT NOT NULL,error_code TEXT);`);
+    CREATE TABLE IF NOT EXISTS crm_waha_runtime(session TEXT PRIMARY KEY,state TEXT NOT NULL,updated_at TEXT NOT NULL,error_code TEXT);
+    CREATE TABLE IF NOT EXISTS crm_waha_lines(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),session TEXT NOT NULL UNIQUE,expected_phone TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')),revision INTEGER NOT NULL DEFAULT 1,created_by TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+    CREATE UNIQUE INDEX IF NOT EXISTS crm_waha_lines_one_active ON crm_waha_lines(user_id) WHERE status='active';
+    CREATE TABLE IF NOT EXISTS crm_waha_recovery(session TEXT PRIMARY KEY,state TEXT NOT NULL,passes INTEGER NOT NULL DEFAULT 0,cursor TEXT,processed INTEGER NOT NULL DEFAULT 0,available_at INTEGER NOT NULL,updated_at TEXT NOT NULL,error_code TEXT,offline_since INTEGER,mode TEXT,window_start INTEGER,new_chats INTEGER NOT NULL DEFAULT 0);`);
+  // Builds of 09/11 (homologation only) created crm_waha_recovery without the reconnection columns.
+  const recoveryColumns = new Set(
+    (db.prepare("PRAGMA table_info(crm_waha_recovery)").all() as Row[]).map((column) =>
+      String(column["name"]),
+    ),
+  );
+  for (const [name, type] of [
+    ["offline_since", "INTEGER"],
+    ["mode", "TEXT"],
+    ["window_start", "INTEGER"],
+    ["new_chats", "INTEGER NOT NULL DEFAULT 0"],
+  ] as const)
+    if (!recoveryColumns.has(name)) db.exec(`ALTER TABLE crm_waha_recovery ADD COLUMN ${name} ${type}`);
   canonicalizeStoredMessageIds(db);
   initialized.add(db);
   return db;
@@ -194,12 +235,138 @@ function decrypt<T>(value: string): T {
   ) as T;
 }
 function configuration() {
-  const row = ensureWahaSchema().prepare("SELECT * FROM crm_waha_config WHERE id=1").get();
-  return {
-    revision: Number(row?.["revision"] ?? 0),
-    config: row ? { ...defaults(), ...decrypt<WahaConfig>(String(row["encrypted"])) } : defaults(),
-  };
+  const db = ensureWahaSchema();
+  const row = db.prepare("SELECT * FROM crm_waha_config WHERE id=1").get();
+  const config: WahaSettings = row
+    ? { ...defaults(), ...decrypt<WahaSettings>(String(row["encrypted"])) }
+    : defaults();
+  if (!Array.isArray(config.blockedPhones)) config.blockedPhones = [];
+  migrateSingleNumber(db, config);
+  return { revision: Number(row?.["revision"] ?? 0), config };
 }
+/**
+ * Release v1 had one number (session, seller and authorized number in the settings). The first time
+ * this release reads them, they become that seller's line with the same session, so every stored
+ * conversation, binding and history checkpoint keeps working. The stored settings are not changed.
+ */
+function migrateSingleNumber(db: ReturnType<typeof getDb>, config: WahaSettings) {
+  if (migrated.has(db)) return;
+  const session = txt(config.session, 60),
+    ownerId = txt(config.ownerId, 60);
+  if (
+    ownerId &&
+    SESSION_NAME.test(session) &&
+    !db.prepare("SELECT 1 FROM crm_waha_lines LIMIT 1").get() &&
+    db.prepare("SELECT 1 FROM users WHERE id=?").get(ownerId)
+  ) {
+    const id = randomUUID();
+    db.prepare(
+      "INSERT INTO crm_waha_lines(id,user_id,session,expected_phone,status,revision,created_by,created_at,updated_at) VALUES(?,?,?,?,'active',1,NULL,?,?)",
+    ).run(id, ownerId, session, phone(config.expectedPhone || ""), now(), now());
+    audit(null, "crm:waha:line:migrated", id, { session });
+  }
+  migrated.add(db);
+}
+const lineOf = (row: Row | undefined): WahaLine | null =>
+  row
+    ? {
+        id: String(row["id"]),
+        userId: String(row["user_id"]),
+        session: String(row["session"]),
+        expectedPhone: String(row["expected_phone"] || ""),
+        status: row["status"] === "disabled" ? "disabled" : "active",
+        revision: Number(row["revision"]),
+        createdAt: String(row["created_at"]),
+        updatedAt: String(row["updated_at"]),
+      }
+    : null;
+const lineById = (id: string) =>
+  lineOf(ensureWahaSchema().prepare("SELECT * FROM crm_waha_lines WHERE id=?").get(id) as Row);
+const activeLineOf = (userId: string) =>
+  lineOf(
+    ensureWahaSchema()
+      .prepare("SELECT * FROM crm_waha_lines WHERE user_id=? AND status='active'")
+      .get(userId) as Row,
+  );
+const activeLineBySession = (session: unknown) =>
+  typeof session === "string" && session
+    ? lineOf(
+        ensureWahaSchema()
+          .prepare("SELECT * FROM crm_waha_lines WHERE session=? AND status='active'")
+          .get(session) as Row,
+      )
+    : null;
+const activeLines = () =>
+  (
+    ensureWahaSchema()
+      .prepare("SELECT * FROM crm_waha_lines WHERE status='active' ORDER BY created_at,id")
+      .all() as Row[]
+  ).map((row) => lineOf(row)!);
+const withLine = (settings: WahaSettings, line: WahaLine): WahaConfig => ({
+  ...settings,
+  lineId: line.id,
+  session: line.session,
+  ownerId: line.userId,
+  expectedPhone: line.expectedPhone,
+});
+/** Session names never reveal the seller and are never reused (stored messages keep their session). */
+const newSessionName = () => `mag-${randomBytes(5).toString("hex")}`;
+function userSummary(userId: string) {
+  const row = getDb()
+    .prepare("SELECT COALESCE(NULLIF(display_name,''),email) name,disabled FROM users WHERE id=?")
+    .get(userId);
+  return { name: row ? String(row["name"]) : "Usuário removido", active: Boolean(row && !row["disabled"]) };
+}
+const phoneHint = (value: string) => (value ? `…${value.slice(-4)}` : null);
+/**
+ * The line a user operates. Sellers only ever reach their own line; administrators name the line
+ * (or get their own, or the only one registered).
+ */
+function resolveLine(user: SiteUser, lineId?: string): WahaLine {
+  if (lineId) {
+    const line = lineById(lineId);
+    if (!line || line.status !== "active")
+      throw new Error("Linha de WhatsApp não encontrada ou desativada.");
+    if (!isAdmin(user) && line.userId !== user.id) throw new Error("Forbidden");
+    return line;
+  }
+  const own = activeLineOf(user.id);
+  if (own) return own;
+  if (isAdmin(user)) {
+    const lines = activeLines();
+    if (lines.length === 1) return lines[0]!;
+    if (lines.length > 1) throw new Error("Escolha a linha de WhatsApp da vendedora.");
+    throw new Error("Cadastre a linha de WhatsApp de uma vendedora nas integrações.");
+  }
+  throw new Error(
+    "Seu número de WhatsApp ainda não foi cadastrado. Peça ao administrador para cadastrá-lo.",
+  );
+}
+let published: { at: number; whatsapp: string } | null = null;
+/** WhatsApp published on the site (read at most once a minute: it is checked on every event). */
+function publishedWhatsapp() {
+  if (published && Date.now() - published.at < 60_000) return published.whatsapp;
+  let whatsapp = "";
+  try {
+    whatsapp = readPublicSiteContent().content.general.whatsapp || "";
+  } catch {
+    /* The published site is optional here; the official number from the code still applies. */
+  }
+  published = { at: Date.now(), whatsapp };
+  return whatsapp;
+}
+/** MAG's official WhatsApp (site) and the numbers blocked by an administrator: never paired. */
+function protectedPhones(config: WahaSettings) {
+  return [
+    ...new Set(
+      [site.whatsapp, publishedWhatsapp(), ...config.blockedPhones]
+        .map((item) => phone(item))
+        .filter((item) => /^\d{12,15}$/.test(item)),
+    ),
+  ];
+}
+const isProtectedPhone = (config: WahaSettings, value: string) =>
+  Boolean(value) && protectedPhones(config).some((item) => samePhone(item, value));
 const baseUrl = (value: string) => {
   const url = new URL(value);
   if (
@@ -217,14 +384,6 @@ export const wahaSettingsSchema = z
     revision: z.number().int().nonnegative(),
     enabled: z.boolean(),
     baseUrl: z.string().trim().min(1).max(500),
-    session: z
-      .string()
-      .trim()
-      .min(1)
-      .max(54)
-      .regex(/^[a-zA-Z0-9_-]+$/),
-    ownerId: z.union([z.literal(""), z.string().uuid()]),
-    expectedPhone: z.string().max(30).optional(),
     apiKey: z.string().max(4000).optional(),
     hmacKey: z.string().max(500).optional(),
     clearSecrets: z
@@ -233,6 +392,17 @@ export const wahaSettingsSchema = z
       .default([]),
     allowFullHistoryImport: z.boolean().optional(),
     allowAdminReplies: z.boolean().optional(),
+    blockedPhones: z.array(z.string().max(30)).max(20).optional(),
+  })
+  .strict();
+export const wahaLineSchema = z
+  .object({
+    id: z.string().uuid().optional(),
+    revision: z.number().int().nonnegative().optional(),
+    userId: z.string().uuid(),
+    expectedPhone: z.string().max(30).default(""),
+    // Pinned NOWEB session DTO; generated when omitted (the screen never asks for it).
+    session: z.string().trim().regex(SESSION_NAME).optional(),
   })
   .strict();
 function validateOwner(ownerId: string) {
@@ -253,6 +423,10 @@ function requireConfigured(config: WahaConfig) {
   validateOwner(config.ownerId);
   if (!/^\d{12,15}$/.test(config.expectedPhone))
     throw new Error("Defina o número autorizado antes de iniciar o WhatsApp.");
+  if (isProtectedPhone(config, config.expectedPhone))
+    throw new Error(
+      "Este número é protegido (WhatsApp oficial da MAG ou bloqueado) e não pode ser conectado ao CRM.",
+    );
 }
 const webhookUrl = () => {
   const raw = process.env["MAG_WAHA_WEBHOOK_URL"] || "http://web:3000/api/crm/webhooks/waha";
@@ -274,9 +448,10 @@ export async function readWahaContactContext(actor: SiteUser, contactId: string)
   const user = commercial(actor),
     { config } = configuration();
   const contact = requireCrmContact(user, contactId);
-  if (!config.enabled || contact.ownerId !== config.ownerId) return null;
+  const line = config.enabled ? activeLineOf(contact.ownerId) : null;
+  if (!line) return null;
   return (await import("./crm-whatsapp-store.server.ts")).readWahaContactContext(user, {
-    session: config.session,
+    session: line.session,
     contactId,
   });
 }
@@ -287,42 +462,75 @@ export async function bindWahaContactOpportunity(
   const user = commercial(actor),
     { config } = configuration();
   const contact = requireCrmContact(user, input.contactId);
-  if (!config.enabled || contact.ownerId !== config.ownerId)
-    throw new Error("Este atendimento não utiliza a sessão WAHA configurada");
-  validateOwner(config.ownerId);
+  const line = config.enabled ? activeLineOf(contact.ownerId) : null;
+  if (!line) throw new Error("Este atendimento não utiliza uma linha WAHA ativa");
+  validateOwner(line.userId);
   return (await import("./crm-whatsapp-store.server.ts")).bindWahaContactOpportunity(user, {
     ...input,
-    session: config.session,
+    session: line.session,
   });
 }
 export function readWahaSettings(actor: SiteUser) {
   administrator(actor);
   const { config, revision } = configuration();
   const db = ensureWahaSchema();
-  const sync = db
-    .prepare(
-      "SELECT sum(processed) processed,count(*) chats,max(updated_at) updatedAt FROM crm_waha_history WHERE session=?",
-    )
-    .get(config.session);
+  const lines = (
+    db.prepare("SELECT * FROM crm_waha_lines ORDER BY status,created_at,id").all() as Row[]
+  ).map((row) => {
+    const line = lineOf(row)!,
+      owner = userSummary(line.userId);
+    const history = db
+      .prepare(
+        "SELECT sum(processed) processed,count(*) chats,max(updated_at) updatedAt FROM crm_waha_history WHERE session=?",
+      )
+      .get(line.session);
+    const runtime = db
+      .prepare("SELECT state,updated_at FROM crm_waha_runtime WHERE session=?")
+      .get(line.session);
+    return {
+      id: line.id,
+      userId: line.userId,
+      ownerName: owner.name,
+      ownerActive: owner.active,
+      session: line.session,
+      expectedPhone: line.expectedPhone,
+      protectedNumber: isProtectedPhone(config, line.expectedPhone),
+      status: line.status,
+      revision: line.revision,
+      createdAt: line.createdAt,
+      updatedAt: line.updatedAt,
+      lastState: runtime ? String(runtime["state"]) : null,
+      lastStateAt: runtime ? String(runtime["updated_at"]) : null,
+      history: history?.["updatedAt"]
+        ? {
+            processed: Number(history["processed"] ?? 0),
+            chats: Number(history["chats"] ?? 0),
+            updatedAt: String(history["updatedAt"]),
+          }
+        : null,
+    };
+  });
+  const owners = new Map(lines.map((line) => [line.session, line.ownerName]));
   return {
     revision,
     enabled: config.enabled,
     baseUrl: config.baseUrl,
-    session: config.session,
-    ownerId: config.ownerId,
-    expectedPhone: config.expectedPhone,
     apiKeyConfigured: Boolean(config.apiKey),
     hmacKeyConfigured: Boolean(config.hmacKey),
     allowFullHistoryImport: config.allowFullHistoryImport === true,
     allowAdminReplies: config.allowAdminReplies === true,
+    blockedPhones: config.blockedPhones,
+    protectedPhones: protectedPhones(config),
     webhookUrl: webhookUrl(),
+    lines,
     events: db
       .prepare(
-        "SELECT id,event_type eventType,state,attempts,created_at createdAt,updated_at updatedAt,error_code errorCode FROM crm_waha_events ORDER BY created_at DESC LIMIT 30",
+        "SELECT id,session,event_type eventType,state,attempts,created_at createdAt,updated_at updatedAt,error_code errorCode FROM crm_waha_events ORDER BY created_at DESC LIMIT 30",
       )
       .all()
       .map((row) => ({
         id: String(row["id"]),
+        lineOwner: owners.get(String(row["session"])) || null,
         eventType: String(row["eventType"]),
         state: String(row["state"]),
         attempts: Number(row["attempts"]),
@@ -330,13 +538,6 @@ export function readWahaSettings(actor: SiteUser) {
         updatedAt: String(row["updatedAt"]),
         errorCode: row["errorCode"] ? String(row["errorCode"]) : null,
       })),
-    sync: sync?.["updatedAt"]
-      ? {
-          processed: Number(sync["processed"] ?? 0),
-          chats: Number(sync["chats"] ?? 0),
-          updatedAt: String(sync["updatedAt"]),
-        }
-      : null,
   };
 }
 export function saveWahaSettings(actor: SiteUser, raw: z.input<typeof wahaSettingsSchema>) {
@@ -347,21 +548,20 @@ export function saveWahaSettings(actor: SiteUser, raw: z.input<typeof wahaSettin
     const { config: existing, revision } = configuration();
     if (revision !== input.revision)
       throw new Error("A configuração WAHA mudou em outra sessão. Atualize antes de salvar.");
-    if (input.ownerId) validateOwner(input.ownerId);
-    const expectedPhone = phone(input.expectedPhone || "");
-    if (expectedPhone && !/^\d{12,15}$/.test(expectedPhone))
-      throw new Error("Informe o número autorizado com DDD e DDI válidos.");
-    const config: WahaConfig = {
+    const blockedPhones = [
+      ...new Set((input.blockedPhones ?? existing.blockedPhones).map((item) => phone(item))),
+    ].filter(Boolean);
+    if (blockedPhones.some((item) => !/^\d{12,15}$/.test(item)))
+      throw new Error("Informe cada número bloqueado com DDI e DDD.");
+    const config: WahaSettings = {
       ...existing,
       enabled: input.enabled,
       baseUrl: baseUrl(input.baseUrl),
-      session: input.session,
-      ownerId: input.ownerId,
-      expectedPhone,
       // Omitted flags keep the stored choice; both start disabled.
       allowFullHistoryImport:
         input.allowFullHistoryImport ?? existing.allowFullHistoryImport === true,
       allowAdminReplies: input.allowAdminReplies ?? existing.allowAdminReplies === true,
+      blockedPhones,
     };
     for (const field of ["apiKey", "hmacKey"] as const) {
       if (input.clearSecrets.includes(field)) config[field] = "";
@@ -379,9 +579,139 @@ export function saveWahaSettings(actor: SiteUser, raw: z.input<typeof wahaSettin
       enabled: config.enabled,
       allowFullHistoryImport: config.allowFullHistoryImport,
       allowAdminReplies: config.allowAdminReplies,
+      blockedPhones: blockedPhones.length,
     });
     return { revision: revision + 1 };
   });
+}
+/**
+ * Registers or edits a seller's line (administrators only). One active line per seller and per
+ * number; protected numbers are refused. Changing the number of a line that already had one moves
+ * the line to a new session, so the new phone never reads the previous phone's WhatsApp store;
+ * conversations already in the CRM stay where they are.
+ */
+export async function saveWahaLine(actor: SiteUser, raw: z.input<typeof wahaLineSchema>) {
+  const user = administrator(actor),
+    input = wahaLineSchema.parse(raw),
+    { config } = configuration();
+  const expectedPhone = phone(input.expectedPhone || "");
+  if (expectedPhone && !/^\d{12,15}$/.test(expectedPhone))
+    throw new Error("Informe o número da vendedora com DDI e DDD válidos.");
+  if (expectedPhone && isProtectedPhone(config, expectedPhone))
+    throw new Error(
+      "Este número é protegido (WhatsApp oficial da MAG ou bloqueado) e não pode ser usado por uma vendedora.",
+    );
+  validateOwner(input.userId);
+  const taken =
+    expectedPhone &&
+    activeLines().find(
+      (line) =>
+        line.id !== input.id && line.expectedPhone && samePhone(line.expectedPhone, expectedPhone),
+    );
+  if (taken) throw new Error("Este número já está cadastrado na linha de outra vendedora.");
+  const db = ensureWahaSchema();
+  if (!input.id) {
+    if (activeLineOf(input.userId))
+      throw new Error("Esta vendedora já tem uma linha ativa. Edite a linha existente.");
+    const session = input.session || newSessionName();
+    if (db.prepare("SELECT 1 FROM crm_waha_lines WHERE session=?").get(session))
+      throw new Error("Este nome de sessão já foi usado por outra linha.");
+    const id = randomUUID();
+    db.prepare(
+      "INSERT INTO crm_waha_lines(id,user_id,session,expected_phone,status,revision,created_by,created_at,updated_at) VALUES(?,?,?,?,'active',1,?,?,?)",
+    ).run(id, input.userId, session, expectedPhone, user.id, now(), now());
+    audit(user.id, "crm:waha:line:create", id, { number: Boolean(expectedPhone) });
+    return { id, revision: 1, session };
+  }
+  const line = lineById(input.id);
+  if (!line) throw new Error("Linha de WhatsApp não encontrada.");
+  if (input.revision !== line.revision)
+    throw new Error("A linha mudou em outra sessão. Atualize antes de salvar.");
+  if (line.userId !== input.userId)
+    throw new Error(
+      "Para outra vendedora, cadastre uma nova linha: cada linha guarda o histórico de quem a usou.",
+    );
+  let session = line.session;
+  const numberChanged = line.expectedPhone !== expectedPhone;
+  if (numberChanged && line.expectedPhone && !samePhone(line.expectedPhone, expectedPhone)) {
+    const lineConfig = withLine(config, line);
+    if (config.apiKey) {
+      let state = "";
+      try {
+        state = txt((await sessionState(lineConfig))?.status, 80);
+      } catch (error) {
+        if (!(error instanceof WahaHttpError) || error.status !== 404)
+          throw new Error(
+            "Não foi possível confirmar no WAHA que esta linha está desconectada. Nada foi alterado.",
+          );
+      }
+      if (["WORKING", "STARTING", "SCAN_QR_CODE"].includes(state))
+        throw new Error("Desconecte o WhatsApp desta linha antes de trocar o número.");
+      // Drops any stored login of the previous phone; its conversations stay in the CRM.
+      await unlinkSession(lineConfig, {
+        resumeFirst: recoveryOf(line.session)?.["mode"] === "paused",
+      }).catch(() => {});
+    }
+    session = newSessionName();
+  }
+  db.prepare(
+    "UPDATE crm_waha_lines SET expected_phone=?,session=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?",
+  ).run(expectedPhone, session, now(), line.id, line.revision);
+  audit(user.id, "crm:waha:line:update", line.id, {
+    number: Boolean(expectedPhone),
+    newSession: session !== line.session,
+  });
+  return { id: line.id, revision: line.revision + 1, session };
+}
+/**
+ * Offboarding and return of a line (administrators only). Disabling disconnects the phone first;
+ * the seller's conversations, contacts and opportunities stay in the CRM.
+ */
+export async function setWahaLineStatus(
+  actor: SiteUser,
+  input: { id: string; revision: number; status: "active" | "disabled" },
+) {
+  const user = administrator(actor),
+    { config } = configuration();
+  const line = lineById(input.id);
+  if (!line) throw new Error("Linha de WhatsApp não encontrada.");
+  if (line.revision !== input.revision)
+    throw new Error("A linha mudou em outra sessão. Atualize antes de salvar.");
+  if (line.status === input.status) return { id: line.id, revision: line.revision };
+  if (input.status === "disabled") {
+    if (config.enabled && config.apiKey) {
+      try {
+        await unlinkSession(withLine(config, line), {
+          resumeFirst: recoveryOf(line.session)?.["mode"] === "paused",
+        });
+      } catch {
+        throw new Error(
+          "Não foi possível desconectar o WhatsApp desta linha no WAHA. Nada foi alterado; tente novamente.",
+        );
+      }
+    }
+    // A disabled period is not a pause: reactivating the line never imports what arrived meanwhile.
+    ensureWahaSchema()
+      .prepare(
+        "UPDATE crm_waha_recovery SET state='cancelled',offline_since=NULL,mode=NULL,window_start=NULL,cursor=NULL,updated_at=? WHERE session=?",
+      )
+      .run(now(), line.session);
+  } else {
+    validateOwner(line.userId);
+    if (activeLineOf(line.userId)) throw new Error("Esta vendedora já tem outra linha ativa.");
+    if (
+      line.expectedPhone &&
+      activeLines().some((item) => item.expectedPhone && samePhone(item.expectedPhone, line.expectedPhone))
+    )
+      throw new Error("O número desta linha já está em uso na linha de outra vendedora.");
+  }
+  ensureWahaSchema()
+    .prepare(
+      "UPDATE crm_waha_lines SET status=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?",
+    )
+    .run(input.status, now(), line.id, line.revision);
+  audit(user.id, input.status === "disabled" ? "crm:waha:line:disable" : "crm:waha:line:enable", line.id);
+  return { id: line.id, revision: line.revision + 1 };
 }
 class WahaHttpError extends Error {
   readonly status: number;
@@ -391,7 +721,7 @@ class WahaHttpError extends Error {
   }
 }
 async function api(
-  config: WahaConfig,
+  config: Pick<WahaSettings, "baseUrl" | "apiKey">,
   path: string,
   options: { method?: string; body?: unknown; accept?: string; timeout?: number } = {},
 ) {
@@ -416,40 +746,151 @@ const sessionPath = (config: WahaConfig) => `/api/sessions/${encodeURIComponent(
 async function sessionState(config: WahaConfig) {
   return (await (await api(config, sessionPath(config))).json()) as any;
 }
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * NOWEB: logout unlinks the phone and waits for a new QR at once; stop leaves the line disconnected.
+ * WhatsApp only removes the device from a running session: a paused session (stopped with its login
+ * kept) is resumed first. Returns false when the removal from the phone could not be confirmed (the
+ * CRM's login is deleted anyway).
+ */
+async function unlinkSession(config: WahaConfig, options: { resumeFirst?: boolean } = {}) {
+  let confirmed = true;
+  if (options.resumeFirst) {
+    confirmed = false;
+    try {
+      await api(config, `${sessionPath(config)}/start`, { method: "POST", body: {} });
+      for (let attempt = 0; attempt < 25 && !confirmed; attempt++) {
+        const status = txt((await sessionState(config).catch(() => null))?.status, 80);
+        // WORKING: logout removes the device; a QR (or failure) means WhatsApp already dropped the login.
+        if (["WORKING", "SCAN_QR_CODE", "FAILED"].includes(status)) confirmed = true;
+        else await sleep(1_000);
+      }
+    } catch {
+      /* The CRM's login is removed below even if the session could not be resumed. */
+    }
+  }
+  for (const step of ["logout", "stop"]) {
+    try {
+      await api(config, `${sessionPath(config)}/${step}`, { method: "POST", body: {} });
+    } catch (error) {
+      // Absent or already stopped sessions are already disconnected.
+      if (!(error instanceof WahaHttpError) || ![404, 422].includes(error.status)) throw error;
+    }
+  }
+  return confirmed;
+}
+/**
+ * Reconnection state of a session: since when the line is offline (the catch-up window), how the
+ * CRM took it offline (paused keeps the phone linked; unlinked needs a new QR) and the catch-up
+ * progress after it comes back.
+ */
+const recoveryOf = (session: string) =>
+  ensureWahaSchema().prepare("SELECT * FROM crm_waha_recovery WHERE session=?").get(session) as
+    | Row
+    | undefined;
+/** `online`: the line was WORKING with its own number until now, so the gap starts now. */
+function markOffline(session: string, mode: "paused" | "unlinked" | null, online: boolean) {
+  ensureWahaSchema()
+    .prepare(
+      "INSERT INTO crm_waha_recovery(session,state,passes,cursor,processed,available_at,updated_at,offline_since,mode) VALUES(?,'idle',0,NULL,0,0,?,?,?) ON CONFLICT(session) DO UPDATE SET offline_since=COALESCE(crm_waha_recovery.offline_since,excluded.offline_since),mode=COALESCE(excluded.mode,crm_waha_recovery.mode),updated_at=excluded.updated_at",
+    )
+    .run(session, now(), online ? Date.now() : null, mode);
+}
+/** What the seller sees about the catch-up after a reconnection (counts only, never content). */
+function recoverySummary(row: Row | undefined) {
+  if (!row || !["pending", "done"].includes(String(row["state"]))) return null;
+  return {
+    state: String(row["state"]) as "pending" | "done",
+    processed: Number(row["processed"] || 0),
+    newChats: Number(row["new_chats"] || 0),
+    /** False: first connection or unknown gap, only the seller's existing conversations are completed. */
+    includesNewChats: row["window_start"] !== null && row["window_start"] !== undefined,
+    nextAt: row["state"] === "pending" ? new Date(Number(row["available_at"])).toISOString() : null,
+    updatedAt: String(row["updated_at"]),
+  };
+}
 function canReplyWithWaha(user: SiteUser, config: WahaConfig) {
   if (!config.ownerId) return false;
-  return (
-    user.id === config.ownerId ||
-    (user.roles.includes("admin") && config.allowAdminReplies === true)
-  );
+  return user.id === config.ownerId || (isAdmin(user) && config.allowAdminReplies === true);
+}
+/** Phone reported by the session (`me`); empty when WAHA did not report a phone address. */
+function reportedPhone(info: any) {
+  const id = txt(info?.me?.id, 200);
+  const fromId = /^\d+(:\d+)?@(c\.us|s\.whatsapp\.net)$/.test(id)
+    ? id.split("@")[0]!.split(":")[0]!
+    : "";
+  const value = phone(fromId || digits(info?.me?.phone));
+  return /^\d{12,15}$/.test(value) ? value : "";
 }
 function numberMatches(config: WahaConfig, info: any) {
-  const reported = phone(
-    String(info?.me?.id || "")
-      .split("@")[0]!
-      .split(":")[0] ||
-      info?.me?.phone ||
-      "",
-  );
+  const reported = reportedPhone(info);
   // WhatsApp may report a Brazilian mobile without the 9th digit; it is still the authorized line.
-  return samePhone(reported, config.expectedPhone);
+  return (
+    Boolean(reported) &&
+    samePhone(reported, config.expectedPhone) &&
+    !isProtectedPhone(config, reported)
+  );
 }
-export async function readWahaConnection(actor: SiteUser) {
-  const user = commercial(actor),
-    { config } = configuration();
+/** True only when WAHA reported a phone that is not the line's authorized number (or is protected). */
+function pairedWithAnotherPhone(config: WahaConfig, info: any) {
+  const reported = reportedPhone(info);
+  return (
+    Boolean(reported) &&
+    (!samePhone(reported, config.expectedPhone) || isProtectedPhone(config, reported))
+  );
+}
+/** A phone that is not the line's number never stays linked: the session is logged out at once. */
+async function rejectAnotherPhone(config: WahaConfig, actorId: string | null) {
+  try {
+    await unlinkSession(config);
+  } catch {
+    /* The state stays "number_mismatch" and the next check tries again. */
+  }
+  audit(actorId, "crm:waha:session:wrong-number", config.lineId);
+}
+const stateMessages: Record<string, string> = {
+  WORKING: "WhatsApp conectado pelo WAHA.",
+  STOPPED: "WhatsApp desconectado. As conversas continuam guardadas no CRM.",
+  STARTING: "A sessão WAHA está iniciando.",
+  SCAN_QR_CODE: "Aguardando leitura do QR Code pelo número autorizado.",
+  FAILED: "A sessão WAHA falhou. Confira a conexão e solicite uma reconexão.",
+  PASSKEY_REQUIRED: "O WhatsApp solicitou uma confirmação adicional de autenticação.",
+  PASSKEY_CONFIRMATION_REQUIRED:
+    "Confirme a autenticação solicitada no aparelho do número autorizado.",
+};
+const wrongPhoneMessage =
+  "O WhatsApp conectado não é o número autorizado desta linha. A conexão foi desfeita automaticamente; conecte com o celular do número autorizado.";
+/** A stopped line is "paused" when the CRM paused it (phone still linked) or "unlinked" (new QR). */
+function displayedState(state: string, reconnection: Row | undefined) {
+  if (state === "STOPPED" && reconnection?.["mode"] === "paused")
+    return { state: "PAUSED", message: pausedMessage };
+  if (state === "STOPPED" && reconnection?.["mode"] === "unlinked")
+    return { state, message: unlinkedMessage };
+  return { state, message: stateMessages[state] || "Aguardando conclusão da conexão WAHA." };
+}
+/** State of one line as seen by `user` (its seller, or an administrator in supervision). */
+async function lineConnection(user: SiteUser, config: WahaConfig) {
+  const admin = isAdmin(user);
+  const reconnection = recoveryOf(config.session);
   const common = {
+    /** Catch-up after the last reconnection (counts only). */
+    recovery: recoverySummary(reconnection),
     provider: "waha" as const,
-    canManage: user.roles.includes("admin"),
-    instance: user.roles.includes("admin") ? config.session : null,
+    canManage: admin,
+    lineId: config.lineId,
+    /** The seller connects, disconnects and reconnects her own number; administrators may help. */
+    canControl: admin || user.id === config.ownerId,
+    ownLine: user.id === config.ownerId,
+    instance: admin ? config.session : null,
     session: config.session,
     capabilities: { media: true, history: true },
     // Only the responsible seller replies by default; administrators supervise.
     canReply: canReplyWithWaha(user, config),
     canSyncConversation:
-      Boolean(config.ownerId) && (user.id === config.ownerId || user.roles.includes("admin")),
-    // Portfolio served by the WhatsApp number (shown only to who may act on it).
-    responsibleId:
-      user.id === config.ownerId || user.roles.includes("admin") ? config.ownerId || null : null,
+      Boolean(config.ownerId) && (user.id === config.ownerId || admin),
+    // Portfolio served by this number (shown only to who may act on it).
+    responsibleId: user.id === config.ownerId || admin ? config.ownerId || null : null,
+    phoneHint: phoneHint(config.expectedPhone),
   };
   if (!config.enabled || !config.apiKey || !config.hmacKey)
     return {
@@ -474,9 +915,11 @@ export async function readWahaConnection(actor: SiteUser) {
       configured: true,
       connected: false,
       state: "phone_required",
-      message: "Defina o número autorizado antes de conectar o WhatsApp.",
+      message: admin
+        ? "Defina o número autorizado desta linha antes de conectar o WhatsApp."
+        : "Seu número de WhatsApp ainda não foi informado. Peça ao administrador para cadastrá-lo.",
     };
-  if (!user.roles.includes("admin") && user.id !== config.ownerId)
+  if (!admin && user.id !== config.ownerId)
     return {
       ...common,
       configured: true,
@@ -489,31 +932,26 @@ export async function readWahaConnection(actor: SiteUser) {
     validateOwner(config.ownerId);
     const result = await sessionState(config),
       state = txt(result.status, 80) || "STOPPED";
-    if (state === "WORKING" && !numberMatches(config, result))
+    if (state === "WORKING" && !numberMatches(config, result)) {
+      const another = pairedWithAnotherPhone(config, result);
+      if (another) await rejectAnotherPhone(config, user.id);
       return {
         ...common,
         configured: true,
         connected: false,
         state: "number_mismatch",
-        message:
-          "A sessão não corresponde ao número autorizado. Envio e recebimento comercial estão bloqueados.",
+        message: another
+          ? wrongPhoneMessage
+          : "A sessão não corresponde ao número autorizado. Envio e recebimento comercial estão bloqueados.",
       };
-    const messages: Record<string, string> = {
-      WORKING: "WhatsApp conectado pelo WAHA.",
-      STOPPED: "Sessão WAHA parada.",
-      STARTING: "A sessão WAHA está iniciando.",
-      SCAN_QR_CODE: "Aguardando leitura do QR Code pelo número autorizado.",
-      FAILED: "A sessão WAHA falhou. Confira a conexão e solicite uma reconexão.",
-      PASSKEY_REQUIRED: "O WhatsApp solicitou uma confirmação adicional de autenticação.",
-      PASSKEY_CONFIRMATION_REQUIRED:
-        "Confirme a autenticação solicitada no aparelho do número autorizado.",
-    };
+    }
+    const shown = displayedState(state, reconnection);
     return {
       ...common,
       configured: true,
       connected: state === "WORKING",
-      state,
-      message: messages[state] || "Aguardando conclusão da conexão WAHA.",
+      state: shown.state,
+      message: shown.message,
     };
   } catch (error) {
     if (error instanceof WahaHttpError && error.status === 404)
@@ -522,7 +960,9 @@ export async function readWahaConnection(actor: SiteUser) {
         configured: true,
         connected: false,
         state: "STOPPED",
-        message: "Sessão ainda não criada. Use Iniciar sessão nas integrações.",
+        message: common.canControl
+          ? "WhatsApp ainda não conectado. Use Conectar para ler o QR Code."
+          : "Sessão ainda não criada.",
       };
     return {
       ...common,
@@ -532,9 +972,169 @@ export async function readWahaConnection(actor: SiteUser) {
       message:
         error instanceof WahaHttpError && [401, 403].includes(error.status)
           ? "O WAHA recusou a credencial configurada."
-          : "Não foi possível verificar o WAHA. Confira o serviço e a configuração.",
+          : error instanceof Error && /vendedora ativa/.test(error.message)
+            ? "A vendedora desta linha está inativa. Um administrador deve desativar ou revisar a linha."
+            : "Não foi possível verificar o WAHA. Confira o serviço e a configuração.",
     };
   }
+}
+type LineSummary = {
+  lineId: string;
+  ownerId: string;
+  ownerName: string;
+  connected: boolean;
+  state: string;
+  message: string;
+  canReply: boolean;
+  canSyncConversation: boolean;
+  phoneHint: string | null;
+  recovery: ReturnType<typeof recoverySummary>;
+};
+/** Administrators without a line of their own: every seller's line, read with one WAHA request. */
+async function supervisionConnection(user: SiteUser, config: WahaSettings, lines: WahaLine[]) {
+  const common = {
+    provider: "waha" as const,
+    canManage: true,
+    lineId: null,
+    canControl: true,
+    ownLine: false,
+    instance: null,
+    session: null,
+    capabilities: { media: true, history: true },
+    canReply: false,
+    canSyncConversation: true,
+    responsibleId: null,
+    phoneHint: null,
+    recovery: null,
+  };
+  if (!config.enabled || !config.apiKey || !config.hmacKey)
+    return {
+      ...common,
+      configured: false,
+      connected: false,
+      state: "unconfigured",
+      message:
+        "WAHA ainda não configurado. Um administrador pode preparar a conexão nas integrações.",
+      lines: [] as LineSummary[],
+    };
+  if (!lines.length)
+    return {
+      ...common,
+      configured: true,
+      connected: false,
+      state: "line_required",
+      message: "Cadastre a linha de WhatsApp de cada vendedora nas integrações.",
+      lines: [] as LineSummary[],
+    };
+  const sessions = new Map<string, any>();
+  let failed = false;
+  try {
+    const list = await (await api(config, "/api/sessions?all=true")).json();
+    for (const item of Array.isArray(list) ? list : []) sessions.set(String(item?.name), item);
+  } catch {
+    failed = true;
+  }
+  const summaries: LineSummary[] = [];
+  for (const line of lines) {
+    const lineConfig = withLine(config, line),
+      info = sessions.get(line.session),
+      reconnection = recoveryOf(line.session);
+    let state = failed ? "error" : txt(info?.status, 80) || "STOPPED",
+      message = failed
+        ? "Não foi possível verificar o WAHA. Confira o serviço e a configuração."
+        : info
+          ? stateMessages[state] || "Aguardando conclusão da conexão WAHA."
+          : "WhatsApp ainda não conectado pela vendedora.";
+    if (info && !failed) ({ state, message } = displayedState(state, reconnection));
+    if (!line.expectedPhone) {
+      state = "phone_required";
+      message = "Defina o número autorizado desta linha antes de conectar o WhatsApp.";
+    } else if (state === "WORKING" && !numberMatches(lineConfig, info)) {
+      const another = pairedWithAnotherPhone(lineConfig, info);
+      if (another) await rejectAnotherPhone(lineConfig, user.id);
+      state = "number_mismatch";
+      message = another
+        ? wrongPhoneMessage
+        : "A sessão não corresponde ao número autorizado. Envio e recebimento comercial estão bloqueados.";
+    }
+    summaries.push({
+      lineId: line.id,
+      ownerId: line.userId,
+      ownerName: userSummary(line.userId).name,
+      connected: state === "WORKING",
+      state,
+      message,
+      canReply: canReplyWithWaha(user, lineConfig),
+      canSyncConversation: true,
+      phoneHint: phoneHint(line.expectedPhone),
+      recovery: recoverySummary(reconnection),
+    });
+  }
+  const connected = summaries.filter((item) => item.connected).length;
+  return {
+    ...common,
+    configured: true,
+    connected: connected > 0,
+    state: "supervision",
+    message: `${connected} de ${summaries.length} linha(s) de WhatsApp conectada(s). Administradores acompanham as conversas${config.allowAdminReplies ? " e podem responder pela linha de cada vendedora." : " sem responder."}`,
+    lines: summaries,
+  };
+}
+const summaryOf = (
+  connection: Awaited<ReturnType<typeof lineConnection>>,
+  line: WahaLine,
+): LineSummary => ({
+  lineId: line.id,
+  ownerId: line.userId,
+  ownerName: userSummary(line.userId).name,
+  connected: connection.connected,
+  state: connection.state,
+  message: connection.message,
+  canReply: connection.canReply,
+  canSyncConversation: connection.canSyncConversation,
+  phoneHint: connection.phoneHint,
+  recovery: connection.recovery,
+});
+/**
+ * Connection shown in the CRM. A seller sees her own line; an administrator sees her own line (if
+ * she sells too) or the single line, plus `lines` with every seller's line for supervision.
+ */
+export async function readWahaConnection(actor: SiteUser) {
+  const user = commercial(actor),
+    { config } = configuration();
+  const own = activeLineOf(user.id);
+  if (!isAdmin(user)) {
+    if (own) return lineConnection(user, withLine(config, own));
+    return {
+      provider: "waha" as const,
+      canManage: false,
+      lineId: null,
+      canControl: false,
+      ownLine: false,
+      instance: null,
+      session: null,
+      capabilities: { media: true, history: true },
+      canReply: false,
+      canSyncConversation: false,
+      responsibleId: null,
+      phoneHint: null,
+      configured: false,
+      connected: false,
+      state: config.enabled ? "line_required" : "unconfigured",
+      message: config.enabled
+        ? "Seu número de WhatsApp ainda não foi cadastrado. Peça ao administrador para cadastrá-lo."
+        : "WAHA ainda não configurado. Um administrador pode preparar a conexão nas integrações.",
+    };
+  }
+  const lines = activeLines();
+  const single = own || (lines.length === 1 ? lines[0]! : null);
+  if (!single) return supervisionConnection(user, config, lines);
+  const main = await lineConnection(user, withLine(config, single));
+  const others = lines.filter((line) => line.id !== single.id);
+  const rest = others.length
+    ? (await supervisionConnection(user, config, others)).lines
+    : ([] as LineSummary[]);
+  return { ...main, lines: [summaryOf(main, single), ...rest] };
 }
 function managedSessionConfig(config: WahaConfig, current: any = {}) {
   const existingHooks = Array.isArray(current.webhooks)
@@ -594,7 +1194,7 @@ async function qrSessionState(
 ): Promise<WahaQrResult | null> {
   const state = txt(info?.status, 80) || "STOPPED";
   if (state === "SCAN_QR_CODE") return null;
-  if (state === "WORKING") return readWahaConnection(user);
+  if (state === "WORKING") return lineConnection(user, config);
   if (state === "STARTING") return preparingQr();
   if (["STOPPED", "FAILED"].includes(state))
     return {
@@ -665,18 +1265,30 @@ async function readWahaQr(user: SiteUser, config: WahaConfig): Promise<WahaQrRes
       return {
         state: "STOPPED",
         requiresStart: true,
-        message: "A sessão ainda não foi criada. Use Iniciar sessão antes de visualizar o QR Code.",
+        message: "A sessão ainda não foi criada. Use Conectar antes de visualizar o QR Code.",
       };
     return { state: "error", message: sessionCommunicationMessage(error) };
   }
 }
+/**
+ * Connect or resume (start), reconnect (restart), QR, status, pause (stop, phone stays linked) and
+ * unlink (logout) of a line. Sellers act on their own line only, as often as they need;
+ * administrators may act on any line and also reapply the receiving configuration (configure).
+ */
 export async function controlWahaSession(
   actor: SiteUser,
-  input: { action: "start" | "restart" | "qr" | "configure" | "status" },
+  input: {
+    action: "start" | "restart" | "qr" | "configure" | "status" | "pause" | "logout";
+    lineId?: string | undefined;
+  },
 ) {
-  const user = administrator(actor),
-    { config } = configuration();
-  if (input.action === "status") return readWahaConnection(user);
+  const user = commercial(actor),
+    { config: settings } = configuration();
+  if (input.action === "configure" && !isAdmin(user)) throw new Error("Forbidden");
+  const config = withLine(settings, resolveLine(user, input.lineId));
+  if (input.action === "status") return lineConnection(user, config);
+  if (input.action === "logout") return disconnectLine(user, config);
+  if (input.action === "pause") return pauseLine(user, config);
   requireConfigured(config);
   if (input.action === "qr") return readWahaQr(user, config);
   const key = sessionControlKey(config);
@@ -699,6 +1311,10 @@ export async function controlWahaSession(
         body: { name: config.session, start: false, config: managedSessionConfig(config) },
       });
     } else {
+      if (existing.status === "WORKING" && pairedWithAnotherPhone(config, existing)) {
+        await rejectAnotherPhone(config, user.id);
+        throw new WahaSessionControlError(wrongPhoneMessage);
+      }
       if (existing.status === "WORKING" && !numberMatches(config, existing))
         throw new WahaSessionControlError(
           "A sessão está vinculada a um número diferente do número autorizado.",
@@ -714,8 +1330,8 @@ export async function controlWahaSession(
     }
     if (input.action !== "configure")
       await api(config, `${sessionPath(config)}/${input.action}`, { method: "POST", body: {} });
-    audit(user.id, `crm:waha:session:${input.action}`);
-    return readWahaConnection(user);
+    audit(user.id, `crm:waha:session:${input.action}`, config.lineId);
+    return lineConnection(user, config);
   } catch (error) {
     if (error instanceof WahaSessionControlError) throw error;
     throw new Error(sessionCommunicationMessage(error));
@@ -723,9 +1339,86 @@ export async function controlWahaSession(
     if (sessionMutations.get(key) === operation) sessionMutations.delete(key);
   }
 }
+/** Current WAHA state of a line; null when the session was never created. */
+async function sessionStateOrNull(config: WahaConfig) {
+  try {
+    return await sessionState(config);
+  } catch (error) {
+    if (error instanceof WahaHttpError && error.status === 404) return null;
+    throw error;
+  }
+}
+/** Runs one lifecycle operation of a line at a time (connect, pause, unlink). */
+async function withSessionMutation<T>(config: WahaConfig, work: () => Promise<T>) {
+  if (!config.enabled || !config.apiKey || !config.hmacKey)
+    throw new Error("Configure as credenciais do WAHA.");
+  const key = sessionControlKey(config);
+  if (sessionMutations.has(key))
+    throw new WahaSessionControlError(
+      "Uma operação desta sessão já está em andamento. Aguarde antes de tentar novamente.",
+    );
+  const operation = Symbol();
+  sessionMutations.set(key, operation);
+  try {
+    return await work();
+  } catch (error) {
+    if (error instanceof WahaSessionControlError) throw error;
+    throw new Error(sessionCommunicationMessage(error));
+  } finally {
+    if (sessionMutations.get(key) === operation) sessionMutations.delete(key);
+  }
+}
+const pausedMessage =
+  "WhatsApp pausado: o celular continua vinculado e nada foi apagado. Use Retomar para voltar sem QR Code; o que chegar enquanto estiver pausado entra no CRM quando a conexão voltar.";
+const unlinkedMessage =
+  "Aparelho desvinculado do CRM. As conversas continuam guardadas; para voltar, use Conectar e leia um novo QR Code.";
+/**
+ * "Pausar": stops the session and keeps the phone linked (no QR to come back). WhatsApp keeps what
+ * arrives meanwhile and delivers it when the line resumes; the catch-up covers anything missing.
+ */
+async function pauseLine(user: SiteUser, config: WahaConfig) {
+  await withSessionMutation(config, async () => {
+    const info = await sessionStateOrNull(config);
+    if (info?.status !== "WORKING")
+      throw new WahaSessionControlError("Só é possível pausar um WhatsApp conectado.");
+    if (pairedWithAnotherPhone(config, info)) {
+      await rejectAnotherPhone(config, user.id);
+      throw new WahaSessionControlError(wrongPhoneMessage);
+    }
+    await api(config, `${sessionPath(config)}/stop`, { method: "POST", body: {} });
+    markOffline(config.session, "paused", true);
+    audit(user.id, "crm:waha:session:pause", config.lineId);
+  });
+  return { ...(await lineConnection(user, config)), message: pausedMessage };
+}
+/**
+ * "Desvincular aparelho": unlinks the phone (logout) and stops the session; coming back needs a new
+ * QR Code. Nothing stored in the CRM is removed.
+ */
+async function disconnectLine(user: SiteUser, config: WahaConfig) {
+  const outcome = await withSessionMutation(config, async () => {
+    const info = await sessionStateOrNull(config);
+    const online = info?.status === "WORKING" && !pairedWithAnotherPhone(config, info);
+    const paused = info?.status === "STOPPED" && recoveryOf(config.session)?.["mode"] === "paused";
+    const removed = await unlinkSession(config, { resumeFirst: paused });
+    // Cancelling a QR Code that was never read unlinks nothing: no "unlinked" label then.
+    markOffline(config.session, online || paused ? "unlinked" : null, online);
+    audit(user.id, "crm:waha:session:logout", config.lineId, { fromPause: paused, confirmed: removed });
+    return { removed, linked: online || paused };
+  });
+  const connection = await lineConnection(user, config);
+  return {
+    ...connection,
+    message: !outcome.linked
+      ? "Conexão cancelada. As conversas continuam guardadas; use Conectar quando quiser ler o QR Code."
+      : outcome.removed
+        ? unlinkedMessage
+        : "O acesso do CRM foi removido. Se o aparelho ainda aparecer no celular, remova-o em WhatsApp → Aparelhos conectados. As conversas continuam guardadas.",
+  };
+}
 async function requireReady(actor: SiteUser, config: WahaConfig) {
   requireConfigured(config);
-  const connection = await readWahaConnection(actor);
+  const connection = await lineConnection(actor, config);
   if (!connection.connected) throw new Error(connection.message);
 }
 /** Registered WhatsApp address of a phone (`check-exists`), so sends never target a spelling that does not exist. */
@@ -787,10 +1480,13 @@ export async function sendWahaMessage(
 ) {
   const user = commercial(actor),
     contact = requireCrmContact(user, input.contactId),
-    { config } = configuration();
+    { config: settings } = configuration();
+  // Each contact is answered through the line of the seller who owns it.
+  const line = settings.enabled ? activeLineOf(contact.ownerId) : null;
+  if (!line)
+    throw new Error("A vendedora responsável por este contato não tem uma linha de WhatsApp ativa.");
+  const config = withLine(settings, line);
   requireConfigured(config);
-  if (contact.ownerId !== config.ownerId)
-    throw new Error("Este contato não pertence à vendedora configurada para o WAHA.");
   if (!canReplyWithWaha(user, config))
     throw new Error(
       "Somente a vendedora responsável responde por este número. O administrador acompanha a conversa sem responder.",
@@ -954,9 +1650,10 @@ export async function handleWahaWebhook(request: Request) {
   } catch {
     return Response.json({ error: "invalid_body" }, { status: 400, headers: privateHeaders });
   }
+  // Every seller's session posts to the same address; only active lines are accepted.
+  const line = activeLineBySession(value?.session);
   if (
-    !value ||
-    value.session !== config.session ||
+    !line ||
     !["message.any", "message.ack", "session.status"].includes(value.event) ||
     !value.payload ||
     typeof value.payload !== "object"
@@ -978,7 +1675,7 @@ export async function handleWahaWebhook(request: Request) {
     .run(
       randomUUID(),
       externalId,
-      config.session,
+      line.session,
       value.event,
       encrypt(payload),
       Date.now(),
@@ -1092,6 +1789,8 @@ async function processMessage(
   historical: boolean,
   identities?: Map<string, Awaited<ReturnType<typeof resolveIdentity>>>,
   me?: any,
+  /** recovered: arrived while the line was offline and found after the reconnection. */
+  options: { recovered?: boolean } = {},
 ) {
   const fromMe = payload.fromMe === true;
   // Full id for WAHA API calls; stable id (without the chat address) for CRM records.
@@ -1140,6 +1839,7 @@ async function processMessage(
     // Delivery codes describe our own messages; customer messages are simply received.
     status: fromMe ? ackStatus(payload.ack) || "sent" : "received",
     historical,
+    recovered: options.recovered === true,
     ownerId: config.ownerId,
   });
   if (
@@ -1170,16 +1870,56 @@ async function processMessage(
   applyEarlyFailure(config.session, externalId);
   return result;
 }
+/**
+ * After a reconnection the CRM catches up on what arrived while the line was offline. With a known
+ * gap (the CRM saw the line leave WORKING) it reads every conversation with activity since then,
+ * the seller's and new ones, and records them as if they had arrived live. Without a known gap
+ * (first connection of a number) it only completes the seller's existing conversations, as history.
+ */
+const RECOVERY_DELAY_MS = 120_000;
+const RECOVERY_SECOND_PASS_MS = 15 * 60_000;
+const RECOVERY_OVERLAP_S = 600;
+const RECOVERY_MAX_CHATS = 300;
+const RECOVERY_MAX_MESSAGES = 100;
+function scheduleRecovery(session: string) {
+  const row = recoveryOf(session);
+  const gap = row?.["offline_since"]
+    ? Math.floor(Number(row["offline_since"]) / 1000) - RECOVERY_OVERLAP_S
+    : null;
+  // A window not caught up yet (offline again before its catch-up ran) is merged, never lost.
+  const kept =
+    row && row["state"] !== "done" && row["window_start"] !== null && row["window_start"] !== undefined
+      ? Number(row["window_start"])
+      : null;
+  const start = gap === null ? kept : kept === null ? gap : Math.min(gap, kept);
+  ensureWahaSchema()
+    .prepare(
+      "INSERT INTO crm_waha_recovery(session,state,passes,cursor,processed,available_at,updated_at,window_start,new_chats) VALUES(?,'pending',0,NULL,0,?,?,?,0) ON CONFLICT(session) DO UPDATE SET state='pending',passes=0,cursor=NULL,processed=0,new_chats=0,available_at=excluded.available_at,updated_at=excluded.updated_at,error_code=NULL,window_start=excluded.window_start,offline_since=NULL,mode=NULL",
+    )
+    .run(session, Date.now() + RECOVERY_DELAY_MS, now(), start);
+}
 async function processEvent(payload: any) {
-  const { config } = configuration();
-  if (!config.enabled || payload.session !== config.session) throw new Error("session_mismatch");
+  const { config: settings } = configuration();
+  const line = settings.enabled ? activeLineBySession(payload.session) : null;
+  if (!line) throw new Error("session_mismatch");
+  const config = withLine(settings, line);
   if (payload.event === "session.status") {
-    const state = txt(payload.payload.status, 80) || "UNKNOWN";
-    ensureWahaSchema()
-      .prepare(
-        "INSERT INTO crm_waha_runtime VALUES(?,?,?,NULL) ON CONFLICT(session) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at,error_code=NULL",
-      )
-      .run(config.session, state, now());
+    const db = ensureWahaSchema(),
+      state = txt(payload.payload.status, 80) || "UNKNOWN";
+    const runtime = db
+      .prepare("SELECT state,error_code FROM crm_waha_runtime WHERE session=?")
+      .get(config.session);
+    const previous = runtime?.["state"];
+    // Online = WORKING with the line's own number (a rejected phone never opens a gap).
+    const wasOnline = previous === "WORKING" && !runtime?.["error_code"];
+    const info = { me: payload.payload.me || payload.me };
+    const another = state === "WORKING" && pairedWithAnotherPhone(config, info);
+    db.prepare(
+      "INSERT INTO crm_waha_runtime VALUES(?,?,?,?) ON CONFLICT(session) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at,error_code=excluded.error_code",
+    ).run(config.session, state, now(), another ? "number_mismatch" : null);
+    if (another) await rejectAnotherPhone(config, null);
+    else if (state === "WORKING" && previous !== "WORKING") scheduleRecovery(config.session);
+    else if (state !== "WORKING" && wasOnline) markOffline(config.session, null, true);
     return;
   }
   requireConfigured(config);
@@ -1219,6 +1959,269 @@ async function processEvent(payload: any) {
     return;
   }
   await processMessage(config, payload.payload, false, undefined, payload.me);
+}
+/** Messages of one conversation since `since` (seconds), oldest first: the newest 100 at most. */
+async function windowMessages(config: WahaConfig, chatId: string, since: number) {
+  const list: any[] = [];
+  for (let offset = 0; offset < RECOVERY_MAX_MESSAGES; offset += 25) {
+    const response = (await (
+      await api(
+        config,
+        `/api/${encodeURIComponent(config.session)}/chats/${encodeURIComponent(chatId)}/messages?limit=25&offset=${offset}&filter.timestamp.gte=${since}&downloadMedia=false`,
+      )
+    ).json()) as any;
+    const page = Array.isArray(response) ? response : response?.messages || response?.data || [];
+    if (!Array.isArray(page)) break;
+    list.push(...page.slice(0, 25));
+    if (page.length < 25) break;
+  }
+  // WAHA lists newest first; the CRM records them in the order they happened, so the last message
+  // decides whether the conversation awaits a reply.
+  return {
+    truncated: list.length >= RECOVERY_MAX_MESSAGES,
+    messages: list
+      .map((message, index) => ({ message, index }))
+      .sort(
+        (a, b) =>
+          (Number(a.message?.timestamp) || 0) - (Number(b.message?.timestamp) || 0) ||
+          b.index - a.index,
+      )
+      .map((item) => item.message),
+  };
+}
+type RecoveryStep = {
+  complete: boolean;
+  cursor: string | null;
+  processed: number;
+  created: number;
+  truncated: boolean;
+};
+/**
+ * Known gap: every conversation with activity since the line went offline (10 minutes of overlap),
+ * the seller's and new ones. Messages are recorded as if they had arrived live: unread, and a new
+ * contact gets its "Atendimento WhatsApp" opportunity marked as received while disconnected.
+ * Conversations without activity in the gap are never read, so old conversations are not imported.
+ */
+async function recoverWindow(
+  config: WahaConfig,
+  due: Row,
+  deadline: number,
+  me: any,
+): Promise<RecoveryStep | "unavailable"> {
+  const since = Number(due["window_start"]);
+  let cursor: { chats: string[]; index: number; offset: number; truncated: boolean } | null = null;
+  try {
+    cursor = due["cursor"] ? JSON.parse(String(due["cursor"])) : null;
+  } catch {
+    cursor = null;
+  }
+  if (!cursor || !Array.isArray(cursor.chats)) {
+    // First step of a pass: conversations with activity since the line went offline, newest first.
+    const chats: string[] = [];
+    let truncated = false;
+    try {
+      for (let offset = 0; ; offset += 50) {
+        if (offset >= RECOVERY_MAX_CHATS) {
+          truncated = true;
+          break;
+        }
+        const response = (await (
+          await api(
+            config,
+            `/api/${encodeURIComponent(config.session)}/chats?limit=50&offset=${offset}&sortBy=conversationTimestamp&sortOrder=desc`,
+          )
+        ).json()) as any;
+        const page = Array.isArray(response) ? response : response?.chats || response?.data || [];
+        if (!Array.isArray(page)) break;
+        let older = false;
+        for (const chat of page.slice(0, 50)) {
+          const at = Number(chat?.conversationTimestamp);
+          if (Number.isFinite(at) && at > 0 && at < since) {
+            older = true;
+            break;
+          }
+          // The NOWEB store lists individual chats as `...@s.whatsapp.net` (or `@lid`).
+          const id = txt(typeof chat?.id === "string" ? chat.id : chat?.id?._serialized, 200).replace(
+            /@s\.whatsapp\.net$/,
+            "@c.us",
+          );
+          if (/^\d+@(c\.us|lid)$/.test(id) && !chats.includes(id)) chats.push(id);
+        }
+        if (older || page.length < 50) break;
+      }
+    } catch {
+      return "unavailable";
+    }
+    cursor = { chats, index: 0, offset: 0, truncated };
+  }
+  const identities = new Map<string, Awaited<ReturnType<typeof resolveIdentity>>>();
+  let processed = 0,
+    created = 0,
+    truncated = cursor.truncated === true;
+  const pause = (newChat: boolean): RecoveryStep => ({
+    complete: false,
+    cursor: JSON.stringify(cursor),
+    processed,
+    created: created + Number(newChat),
+    truncated,
+  });
+  while (cursor.index < cursor.chats.length) {
+    if (Date.now() > deadline) return pause(false);
+    const chatId = cursor.chats[cursor.index]!;
+    let list: any[] = [];
+    try {
+      const result = await windowMessages(config, chatId, since);
+      list = result.messages;
+      if (result.truncated) truncated = cursor.truncated = true;
+    } catch {
+      // One conversation failing (e.g. removed chat) never blocks the others.
+    }
+    let newChat = false;
+    for (; cursor.offset < list.length; cursor.offset++) {
+      if (Date.now() > deadline) return pause(newChat);
+      try {
+        const result = await processMessage(
+          config,
+          { ...list[cursor.offset], chatId },
+          false,
+          identities,
+          me,
+          { recovered: true },
+        );
+        if (result && !result.duplicate) processed++;
+        if (result?.created) newChat = true;
+      } catch {
+        // E.g. a file WhatsApp no longer serves: the message itself is kept; the next pass retries it.
+      }
+    }
+    if (newChat) created++;
+    cursor.index++;
+    cursor.offset = 0;
+  }
+  return { complete: true, cursor: null, processed, created, truncated };
+}
+/** Unknown gap (first connection of a number): only the seller's existing conversations, as history. */
+async function recoverPortfolio(
+  config: WahaConfig,
+  due: Row,
+  deadline: number,
+  me: any,
+): Promise<RecoveryStep> {
+  const db = ensureWahaSchema();
+  const chats = db
+    .prepare(
+      "SELECT id,chat_id,contact_id FROM crm_whatsapp_bindings WHERE session=? AND id>? ORDER BY id LIMIT 25",
+    )
+    .all(config.session, String(due["cursor"] || "")) as Row[];
+  const identities = new Map<string, Awaited<ReturnType<typeof resolveIdentity>>>();
+  let cursor = due["cursor"] ? String(due["cursor"]) : "",
+    processed = 0;
+  for (const chat of chats) {
+    if (Date.now() > deadline)
+      return { complete: false, cursor, processed, created: 0, truncated: false };
+    const last = db
+      .prepare(
+        "SELECT max(sent_at) at FROM crm_messages WHERE provider='waha' AND account=? AND contact_id=?",
+      )
+      .get(config.session, chat["contact_id"])?.["at"];
+    const since = last
+      ? Math.floor(new Date(String(last)).getTime() / 1000) - RECOVERY_OVERLAP_S
+      : 0;
+    if (since > 0) {
+      let list: any[] = [];
+      try {
+        list = (await windowMessages(config, String(chat["chat_id"]), since)).messages;
+      } catch {
+        // One conversation failing (e.g. removed chat) never blocks the others.
+      }
+      for (const message of list) {
+        try {
+          const result = await processMessage(
+            config,
+            { ...message, chatId: String(chat["chat_id"]) },
+            true,
+            identities,
+            me,
+          );
+          if (result && !result.duplicate) processed++;
+        } catch {
+          // One message (e.g. an unavailable file) never blocks the others.
+        }
+      }
+    }
+    cursor = String(chat["id"]);
+  }
+  return { complete: chats.length < 25, cursor, processed, created: 0, truncated: false };
+}
+/**
+ * One step of the catch-up after a reconnection, run after live events and in small steps. Two
+ * passes (2 and 15 minutes after the reconnection): WhatsApp may deliver the history of a newly
+ * linked phone a few minutes later. Message ids keep every pass free of duplicates.
+ */
+async function runRecoveryStep(budgetMs = 10_000) {
+  const db = ensureWahaSchema();
+  const due = db
+    .prepare(
+      "SELECT * FROM crm_waha_recovery WHERE state='pending' AND available_at<=? ORDER BY available_at LIMIT 1",
+    )
+    .get(Date.now());
+  if (!due) return;
+  const session = String(due["session"]);
+  const finish = (state: string, error: string | null = null) =>
+    db
+      .prepare("UPDATE crm_waha_recovery SET state=?,error_code=?,updated_at=? WHERE session=?")
+      .run(state, error, now(), session);
+  const later = (delay: number, error: string | null = null) =>
+    db
+      .prepare(
+        "UPDATE crm_waha_recovery SET available_at=?,error_code=?,updated_at=? WHERE session=?",
+      )
+      .run(Date.now() + delay, error, now(), session);
+  const { config: settings } = configuration();
+  const line = settings.enabled ? activeLineBySession(session) : null;
+  if (!line) return finish("cancelled");
+  const config = withLine(settings, line);
+  let info: any;
+  try {
+    info = await sessionState(config);
+  } catch {
+    return later(60_000, "waha_unavailable");
+  }
+  // Offline again before the catch-up: the window is kept and merged into the next reconnection.
+  if (info?.status !== "WORKING") return finish("idle", "not_connected");
+  if (!numberMatches(config, info)) return finish("cancelled", "number_mismatch");
+  const deadline = Date.now() + budgetMs;
+  const step =
+    due["window_start"] === null || due["window_start"] === undefined
+      ? await recoverPortfolio(config, due, deadline, info.me)
+      : await recoverWindow(config, due, deadline, info.me);
+  if (step === "unavailable") return later(60_000, "waha_unavailable");
+  if (!step.complete) {
+    db.prepare(
+      "UPDATE crm_waha_recovery SET cursor=?,processed=processed+?,new_chats=new_chats+?,available_at=?,updated_at=? WHERE session=?",
+    ).run(step.cursor, step.processed, step.created, Date.now(), now(), session);
+    return;
+  }
+  const passes = Number(due["passes"]) + 1;
+  db.prepare(
+    "UPDATE crm_waha_recovery SET state=?,passes=?,cursor=NULL,processed=processed+?,new_chats=new_chats+?,available_at=?,updated_at=?,error_code=? WHERE session=?",
+  ).run(
+    passes >= 2 ? "done" : "pending",
+    passes,
+    step.processed,
+    step.created,
+    Date.now() + RECOVERY_SECOND_PASS_MS,
+    now(),
+    step.truncated ? "limit" : null,
+    session,
+  );
+  if (step.processed || step.created)
+    audit(null, "crm:waha:recovery", line.id, {
+      processed: step.processed,
+      newChats: step.created,
+      pass: passes,
+      gap: due["window_start"] !== null && due["window_start"] !== undefined,
+    });
 }
 let draining = false,
   worker: ReturnType<typeof setInterval> | undefined;
@@ -1265,6 +2268,8 @@ export async function drainWahaEvents() {
         );
       }
     }
+    // Catch-up work never delays live events: it runs after them, in small steps.
+    if (events.length < 10) await runRecoveryStep().catch(() => {});
   } finally {
     draining = false;
   }
@@ -1289,35 +2294,43 @@ export function retryWahaEvent(actor: SiteUser, id: string) {
   if (process.env["CRM_DISABLE_WORKER"] !== "1") void drainWahaEvents().catch(() => {});
   return { ok: true };
 }
-let syncingHistory = false;
+/** One history import at a time per line; different sellers never wait for each other. */
+const syncingSessions = new Set<string>();
+function lockHistory(session: string) {
+  if (syncingSessions.has(session))
+    throw new Error("Uma sincronização já está em andamento. Aguarde antes de continuar.");
+  syncingSessions.add(session);
+  return () => syncingSessions.delete(session);
+}
 export async function syncWahaHistory(
   actor: SiteUser,
-  input: { chatId?: string | undefined; limit?: number | undefined } = {},
+  input: { chatId?: string | undefined; limit?: number | undefined; lineId?: string | undefined } = {},
 ) {
-  if (syncingHistory)
-    throw new Error("Uma sincronização já está em andamento. Aguarde antes de continuar.");
-  syncingHistory = true;
+  const user = administrator(actor),
+    { config: settings } = configuration();
+  const config = withLine(settings, resolveLine(user, input.lineId));
+  const release = lockHistory(config.session);
   try {
-    return await syncWahaHistoryPage(administrator(actor), input);
+    return await syncWahaHistoryPage(user, config, input);
   } finally {
-    syncingHistory = false;
+    release();
   }
 }
 /**
- * History of ONE conversation, chosen in the Atendimento: the responsible seller or an administrator
- * (supervision). Uses the conversation's WhatsApp address, or asks WhatsApp for it when none is known yet.
+ * History of ONE conversation, chosen in the Atendimento: the seller who owns the contact or an
+ * administrator (supervision). Uses the conversation's WhatsApp address, or asks WhatsApp for it when
+ * none is known yet. Always through the line of the contact's seller.
  */
 export async function syncWahaContactHistory(actor: SiteUser, contactId: string) {
   const user = commercial(actor),
-    { config } = configuration();
+    { config: settings } = configuration();
   const contact = requireCrmContact(user, contactId);
-  if (!config.enabled || !config.ownerId || contact.ownerId !== config.ownerId)
-    throw new Error("Este contato não utiliza o WhatsApp configurado para a vendedora.");
-  if (user.id !== config.ownerId && !user.roles.includes("admin"))
+  const line = settings.enabled ? activeLineOf(contact.ownerId) : null;
+  if (!line) throw new Error("Este contato não utiliza uma linha de WhatsApp ativa.");
+  if (user.id !== line.userId && !isAdmin(user))
     throw new Error("Somente a vendedora responsável ou um administrador busca este histórico.");
-  if (syncingHistory)
-    throw new Error("Uma sincronização já está em andamento. Aguarde antes de continuar.");
-  syncingHistory = true;
+  const config = withLine(settings, line);
+  const release = lockHistory(config.session);
   try {
     await requireReady(user, config);
     const { ensureWhatsAppStoreSchema } = await import("./crm-whatsapp-store.server.ts");
@@ -1339,7 +2352,7 @@ export async function syncWahaContactHistory(actor: SiteUser, contactId: string)
     const started = Date.now();
     for (const chatId of chats) {
       for (let page = 0; page < 30; page++) {
-        const result = await syncWahaHistoryPage(user, { chatId, limit: 10 }, true);
+        const result = await syncWahaHistoryPage(user, config, { chatId, limit: 10 }, true);
         processed += result.processed;
         hasMore = result.hasMore;
         if (!result.hasMore || Date.now() - started > 45_000) break;
@@ -1355,16 +2368,16 @@ export async function syncWahaContactHistory(actor: SiteUser, contactId: string)
         : `${processed} mensagem(ns) nova(s). Histórico disponível desta conversa conferido.`,
     };
   } finally {
-    syncingHistory = false;
+    release();
   }
 }
 async function syncWahaHistoryPage(
   user: SiteUser,
+  config: WahaConfig,
   input: { chatId?: string | undefined; limit?: number | undefined },
   contactScoped = false,
 ) {
-  const { config } = configuration();
-  // Importing every conversation of the number is an explicit administrative choice (off by default).
+  // Importing every conversation of a number is an explicit administrative choice (off by default).
   if (!input.chatId && config.allowFullHistoryImport !== true)
     throw new Error(
       "A importação geral do histórico está desativada. Use “Buscar histórico desta conversa” no Atendimento.",

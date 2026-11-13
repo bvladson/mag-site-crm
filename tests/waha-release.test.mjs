@@ -29,7 +29,6 @@ const base = {
   revision: 0,
   enabled: true,
   baseUrl: "http://waha.release.test:3000",
-  session,
   apiKey: "QA-API-KEY-RELEASE",
   hmacKey: "QA-HMAC-RELEASE",
 };
@@ -83,14 +82,12 @@ const legacy = crm.createContact(seller, {
 db.getDb().prepare("UPDATE crm_contacts SET phone=? WHERE id=?").run("558577776666", legacy.id);
 
 const waha = await import("../src/lib/crm-waha.server.ts");
-const save = (patch = {}) =>
-  waha.saveWahaSettings(admin, {
-    ...base,
-    revision: waha.readWahaSettings(admin).revision,
-    ownerId: seller.id,
-    expectedPhone: "5585991234567",
-    ...patch,
-  });
+// Shared settings; the seller's number is her own line (created once, with this session).
+const save = async (patch = {}) => {
+  waha.saveWahaSettings(admin, { ...base, revision: waha.readWahaSettings(admin).revision, ...patch });
+  if (!waha.readWahaSettings(admin).lines.length)
+    await waha.saveWahaLine(admin, { userId: seller.id, expectedPhone: "5585991234567", session });
+};
 const count = (table) => Number(db.getDb().prepare(`SELECT count(*) n FROM ${table}`).get().n);
 let customer;
 
@@ -152,7 +149,7 @@ test("manual registration stores Brazilian mobiles with the 9th digit and never 
 });
 
 test("administrators supervise: they read the conversation but do not reply unless explicitly allowed", async () => {
-  save();
+  await save();
   assert.equal(waha.readWahaSettings(admin).allowAdminReplies, false);
   assert.equal(waha.readWahaSettings(admin).allowFullHistoryImport, false);
   assert.equal((await waha.readWahaConnection(admin)).canReply, false);
@@ -179,14 +176,14 @@ test("administrators supervise: they read the conversation but do not reply unle
     db.getDb().prepare("SELECT external_id FROM crm_messages WHERE id=?").get(sent.id).external_id,
     "true_3EB0REL1",
   );
-  save({ allowAdminReplies: true });
+  await save({ allowAdminReplies: true });
   assert.equal((await waha.readWahaConnection(admin)).canReply, true);
   await waha.sendWahaMessage(admin, {
     contactId: customer.id,
     text: "Supervisão autorizada",
     clientMessageId: randomUUID(),
   });
-  save({ allowAdminReplies: false });
+  await save({ allowAdminReplies: false });
   assert.equal((await waha.readWahaConnection(admin)).canReply, false);
 });
 
@@ -252,7 +249,7 @@ test("history of the selected conversation only: owner or administrator, never t
 });
 
 test("when an administrator enables the general import, NOWEB @s.whatsapp.net chats are recognized", async () => {
-  save({ allowFullHistoryImport: true });
+  await save({ allowFullHistoryImport: true });
   override = async (url) => {
     if (url.pathname === `/api/${session}/chats`)
       return json([{ id: "558566665555@s.whatsapp.net" }, { id: "120363000000000000@g.us" }]);
@@ -271,5 +268,5 @@ test("when an administrator enables the general import, NOWEB @s.whatsapp.net ch
     "groups stay out; ids are normalized",
   );
   override = undefined;
-  save({ allowFullHistoryImport: false });
+  await save({ allowFullHistoryImport: false });
 });

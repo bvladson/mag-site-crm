@@ -31,7 +31,7 @@ Limites iniciais: 1 GiB de RAM, 0,5 CPU e 192 processos; heap Node de 512 MiB e 
 | `SITE_DATA_DIR` existente no backend | Contém SQLite, chave MAG e anexos privados. Preservar o volume atual. |
 | `CRM_DISABLE_WORKER=1` | Somente testes/diagnóstico: suspende os workers. Não usar na operação normal. |
 
-No painel MAG `/interno/crm/integracoes`, o administrador configura URL interna `http://waha:3000`, nome de sessão, responsável, número de teste autorizado e credencial. O HMAC é gerado no backend quando necessário. As credenciais ficam criptografadas em `crm_waha_config`, com AES-256-GCM e chave `data/security/crm-waha.key`; a leitura administrativa devolve apenas indicadores de configuração. Os campos de senha vazios mantêm o segredo existente.
+No painel MAG `/interno/crm/integracoes`, o administrador configura o conector (URL interna `http://waha:3000`, credencial e números bloqueados) e cadastra a **linha de cada vendedora** (vendedora + número autorizado; a sessão é gerada). Desde a release multiusuário, sessão, responsável e número pertencem à linha, não à configuração geral (ver "Multiusuário" abaixo). O HMAC é gerado no backend quando necessário. As credenciais ficam criptografadas em `crm_waha_config`, com AES-256-GCM e chave `data/security/crm-waha.key`; a leitura administrativa devolve apenas indicadores de configuração. Os campos de senha vazios mantêm o segredo existente.
 
 É permitido salvar sem responsável e sem número nesta etapa. Iniciar, reconectar, sincronizar, enviar e processar mensagens exigem uma responsável ativa e número autorizado. Sessão: letras, números, `_` e `-`, até 54 caracteres; uma sessão inicial sugerida é `mag-teste`. Uma sessão conectada com número diferente é bloqueada no CRM. A conferência ocorre depois do pareamento; o operador deve conferir o aparelho antes de escanear.
 
@@ -87,6 +87,28 @@ Decisões aplicadas nesta release:
 - **QR Code:** depois de "Iniciar sessão" ou "Reconectar", o QR aparece e se renova sozinho até ser lido, expirar ou o tempo acabar.
 
 O número definitivo é autorizado separadamente. Não reutilizar o número de marketing usado na homologação.
+
+## Multiusuário (release 20261109-crm-whatsapp-v2.1)
+
+Decisão do usuário de 09/11/2026: cada vendedora tem o seu funil, a sua janela e a sua conta; só o Admin vê tudo; o QR Code é livre para sair e entrar, mantendo o histórico.
+
+- **Linhas:** tabela `crm_waha_lines` (vendedora, sessão WAHA, número autorizado, ativa/desativada). Uma linha ativa por vendedora e por número (as duas grafias do 9º dígito contam como o mesmo número). Só o administrador cadastra e altera linhas. A sessão é gerada (`mag-` + 10 hexadecimais), não revela a vendedora e nunca é reutilizada.
+- **Migração da v1:** na primeira leitura, a configuração de um número só (sessão, responsável, número) vira a linha dessa vendedora com a mesma sessão; mensagens, vínculos e checkpoints continuam valendo. A configuração gravada não é reescrita, então o retorno à v1 continua funcionando (o número digitado depois na v2 não passa para a v1).
+- **Vendedora:** "Meu WhatsApp", no rodapé do Atendimento. Ela opera só a própria linha e nada do CRM é apagado em nenhuma das ações:
+  - **Conectar:** QR renovado sozinho.
+  - **Pausar** (`stop`): o celular continua vinculado; **Retomar** volta sem QR Code e o WhatsApp entrega o que guardou para o aparelho.
+  - **Desvincular aparelho** (`logout` + `stop`): o CRM sai de "Aparelhos conectados"; para voltar, novo QR Code. Uma sessão pausada é retomada por alguns segundos antes do logout, porque o WhatsApp só remove o aparelho de uma sessão em execução; se não der, o CRM apaga o próprio acesso e orienta remover pelo celular.
+  - A tela recomenda manter conectado durante o expediente; pausar e desvincular são exceção.
+- **Recuperação depois de reconectar:** quando a linha volta a WORKING, o worker agenda a conferência (2 min depois e de novo 15 min depois). O CRM guarda em `crm_waha_recovery` desde quando a linha está fora (`offline_since`, gravado ao pausar, desvincular ou ao receber a saída de WORKING) e como saiu (`mode`).
+  - **Intervalo conhecido:** lista as conversas do store com atividade desde a saída (10 min de sobreposição; até 300 conversas e as 100 mensagens mais novas de cada) e grava as mensagens do intervalo como se tivessem chegado na hora, da mais antiga para a mais nova: cliente fica não lida, a última mensagem define "aguardando resposta" e contato novo vira lead da vendedora com a oportunidade "Atendimento WhatsApp" marcada como recebida enquanto a linha estava desconectada. Conversas sem atividade no intervalo não são lidas.
+  - **Intervalo desconhecido** (primeira conexão de um número, troca de número, linha reativada): só completa as conversas que já estão na carteira, como histórico. Nada antigo do celular é importado.
+  - Se a linha cair de novo antes da conferência, o intervalo fica guardado (`idle`) e é somado ao próximo. Duplicadas são ignoradas pelo identificador da mensagem. A tela mostra só contagens (mensagens recuperadas e conversas novas).
+  - Na pausa, o WhatsApp entrega ao aparelho vinculado o que chegou e o WAHA dispara os eventos normalmente; a conferência cobre o que faltar. No novo pareamento (depois de desvincular), as mensagens do intervalo chegam pelo histórico que o WhatsApp envia ao aparelho (sem eventos); a conferência as busca no store.
+- **Administrador:** vê todas as linhas e conversas ("Supervisão: X de Y linhas"), opera qualquer linha para ajudar, não responde por padrão (`allowAdminReplies`). Quando permitido, responde pela linha da vendedora dona do contato.
+- **Números protegidos:** o WhatsApp comercial oficial da MAG (`src/config/site.ts` e o publicado no site) e a lista de bloqueio do administrador nunca são cadastrados nem conectados. Se um aparelho de outro número (ou protegido) for pareado numa linha, o CRM desfaz a conexão na hora (logout + stop), registra `crm:waha:session:wrong-number` e não grava nada dele.
+- **Troca de número:** só com a linha desconectada; a linha passa para uma sessão nova (o aparelho novo nunca lê o store do anterior). As conversas antigas continuam no CRM, na carteira da vendedora.
+- **Desligamento (offboarding):** "Desativar linha" desconecta o aparelho e bloqueia a linha; a carteira (contatos, oportunidades, conversas) continua com a vendedora e visível ao Admin. O período desativado não é pausa: reativar não importa o que chegou nele. Hoje o CRM não transfere carteira com oportunidades.
+- **Capacidade:** cada sessão NOWEB usa memória no conector (limite atual de 1 GiB para todas as sessões). Acompanhar ao passar de 4–5 linhas conectadas e ajustar `mem_limit` com janela própria.
 
 ## Limitações a homologar
 

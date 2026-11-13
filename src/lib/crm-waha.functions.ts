@@ -22,6 +22,7 @@ export const bindWahaContactOpportunity = createServerFn({ method: "POST" })
 export const getWahaSettings = createServerFn({ method: "GET" }).handler(async () =>
   (await import("./crm-waha.server")).readWahaSettings(await admin()),
 );
+/** Connector settings shared by every line (address, credentials, options and blocked numbers). */
 export const saveWahaSettings = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) =>
     z
@@ -29,14 +30,6 @@ export const saveWahaSettings = createServerFn({ method: "POST" })
         revision: z.number().int().nonnegative(),
         enabled: z.boolean(),
         baseUrl: z.string().trim().min(1).max(500),
-        session: z
-          .string()
-          .trim()
-          .min(1)
-          .max(54)
-          .regex(/^[a-zA-Z0-9_-]+$/),
-        ownerId: z.union([z.literal(""), z.string().uuid()]),
-        expectedPhone: z.string().max(30).optional(),
         apiKey: z.string().max(4000).optional(),
         hmacKey: z.string().max(500).optional(),
         clearSecrets: z
@@ -45,6 +38,7 @@ export const saveWahaSettings = createServerFn({ method: "POST" })
           .default([]),
         allowFullHistoryImport: z.boolean().optional(),
         allowAdminReplies: z.boolean().optional(),
+        blockedPhones: z.array(z.string().max(30)).max(20).optional(),
       })
       .strict()
       .parse(input),
@@ -52,18 +46,53 @@ export const saveWahaSettings = createServerFn({ method: "POST" })
   .handler(async ({ data }) =>
     (await import("./crm-waha.server")).saveWahaSettings(await admin(), data),
   );
-export const getWahaConnection = createServerFn({ method: "GET" }).handler(async () =>
-  (await import("./crm-waha.server")).readWahaConnection(await user()),
-);
-export const controlWahaSession = createServerFn({ method: "POST" })
+/** Registers a seller's line (number) or edits its authorized number. */
+export const saveWahaLine = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) =>
     z
-      .object({ action: z.enum(["start", "restart", "qr", "configure", "status"]) })
+      .object({
+        id: z.string().uuid().optional(),
+        revision: z.number().int().nonnegative().optional(),
+        userId: z.string().uuid(),
+        expectedPhone: z.string().max(30).default(""),
+      })
       .strict()
       .parse(input),
   )
   .handler(async ({ data }) =>
-    (await import("./crm-waha.server")).controlWahaSession(await admin(), data),
+    (await import("./crm-waha.server")).saveWahaLine(await admin(), data),
+  );
+/** Disables (offboarding: disconnects first) or reactivates a line. Conversations stay in the CRM. */
+export const setWahaLineStatus = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        id: z.string().uuid(),
+        revision: z.number().int().nonnegative(),
+        status: z.enum(["active", "disabled"]),
+      })
+      .strict()
+      .parse(input),
+  )
+  .handler(async ({ data }) =>
+    (await import("./crm-waha.server")).setWahaLineStatus(await admin(), data),
+  );
+export const getWahaConnection = createServerFn({ method: "GET" }).handler(async () =>
+  (await import("./crm-waha.server")).readWahaConnection(await user()),
+);
+/** Sellers connect, read the QR, reconnect and disconnect their own line; administrators any line. */
+export const controlWahaSession = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        action: z.enum(["start", "restart", "qr", "configure", "status", "pause", "logout"]),
+        lineId: z.string().uuid().optional(),
+      })
+      .strict()
+      .parse(input),
+  )
+  .handler(async ({ data }) =>
+    (await import("./crm-waha.server")).controlWahaSession(await user(), data),
   );
 export const sendWahaMessage = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) =>
@@ -86,6 +115,7 @@ export const syncWahaHistory = createServerFn({ method: "POST" })
       .object({
         chatId: z.string().max(200).optional(),
         limit: z.number().int().min(1).max(100).optional(),
+        lineId: z.string().uuid().optional(),
       })
       .strict()
       .parse(input),
@@ -93,7 +123,7 @@ export const syncWahaHistory = createServerFn({ method: "POST" })
   .handler(async ({ data }) =>
     (await import("./crm-waha.server")).syncWahaHistory(await admin(), data),
   );
-/** History of the selected conversation only (responsible seller or administrator). */
+/** History of the selected conversation only (the contact's seller or an administrator). */
 export const syncWahaContactHistory = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) =>
     z.object({ contactId: z.string().uuid() }).strict().parse(input),

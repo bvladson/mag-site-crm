@@ -91,6 +91,8 @@ export interface IngestWahaMessageInput {
   at?: string | undefined;
   status?: string | undefined;
   historical?: boolean | undefined;
+  /** Arrived while the line was offline and was found after the reconnection (treated as live). */
+  recovered?: boolean | undefined;
   ownerId: string;
   unitId?: string | null | undefined;
 }
@@ -101,6 +103,8 @@ export function ingestWahaMessage(input: IngestWahaMessageInput): {
   opportunityId: string | null;
   triageReason: string | null;
   duplicate: boolean;
+  /** True when this message opened a new conversation in the CRM (new binding). */
+  created: boolean;
 } {
   const db = ensureWhatsAppStoreSchema();
   const actor = ownerActor(input.ownerId);
@@ -145,6 +149,7 @@ export function ingestWahaMessage(input: IngestWahaMessageInput): {
         opportunityId: binding?.["opportunity_id"] ? String(binding["opportunity_id"]) : null,
         triageReason: binding?.["triage_reason"] ? String(binding["triage_reason"]) : null,
         duplicate: true,
+        created: false,
       };
     }
     // Both Brazilian spellings (with/without the 9th digit) identify the same conversation.
@@ -161,6 +166,7 @@ export function ingestWahaMessage(input: IngestWahaMessageInput): {
       )
       .filter(Boolean) as Row[];
     let binding = found[0];
+    const created = !binding;
     if (binding && binding["owner_id"] !== actor.id)
       throw new Error(
         "O atendimento está vinculado a outra carteira; revise a configuração administrativa",
@@ -232,7 +238,9 @@ export function ingestWahaMessage(input: IngestWahaMessageInput): {
       opportunityId = createOpportunity(actor, {
         contactId: contact.id,
         title: "Atendimento WhatsApp",
-        interest: "Contato recebido pelo WhatsApp",
+        interest: input.recovered
+          ? "Contato recebido pelo WhatsApp enquanto a linha estava desconectada"
+          : "Contato recebido pelo WhatsApp",
         origin: "WhatsApp",
         unitId: input.unitId || contact.unitId,
       }).id;
@@ -266,7 +274,14 @@ export function ingestWahaMessage(input: IngestWahaMessageInput): {
           opportunityId,
         );
     }
-    return { message, contactId: contact.id, opportunityId, triageReason, duplicate: false };
+    return {
+      message,
+      contactId: contact.id,
+      opportunityId,
+      triageReason,
+      duplicate: false,
+      created,
+    };
   });
 }
 /** Admin/user selection binds context only; it never moves a stage or changes a proposal. */

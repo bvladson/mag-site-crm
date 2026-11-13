@@ -26,6 +26,7 @@ import {
 } from "@/lib/crm.functions";
 import { getCrmConnection, sendCrmMessage } from "@/lib/crm-integrations.functions";
 import { ErrorState, Loading, useMe } from "@/components/interno/ui";
+import type { WahaRecovery } from "./WahaLinePanel";
 
 export type CrmDialog =
   | {
@@ -54,6 +55,28 @@ interface CrmStore extends CrmBootstrap {
         canSyncConversation?: boolean;
         /** WAHA: portfolio served by the connected number (only for the seller and administrators). */
         responsibleId?: string | null;
+        /** WAHA: line shown (the seller's own line, or the single line for administrators). */
+        lineId?: string | null;
+        /** WAHA: the signed-in user owns this line and connects/disconnects it herself. */
+        ownLine?: boolean;
+        canControl?: boolean;
+        /** WAHA: last digits of the authorized number. */
+        phoneHint?: string | null;
+        /** WAHA: catch-up of what arrived while the line was offline (counts only). */
+        recovery?: WahaRecovery;
+        /** WAHA (administrators): every seller's line, for supervision. */
+        lines?: Array<{
+          lineId: string;
+          ownerId: string;
+          ownerName: string;
+          connected: boolean;
+          state: string;
+          message: string;
+          canReply: boolean;
+          canSyncConversation: boolean;
+          phoneHint: string | null;
+          recovery?: WahaRecovery;
+        }>;
       }
     | undefined;
   connectionLoading: boolean;

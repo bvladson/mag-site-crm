@@ -41,6 +41,7 @@ import {
   getWahaContactContext,
   syncWahaContactHistory,
 } from "@/lib/crm-waha.functions";
+import { MyWhatsAppButton } from "./WahaLinePanel";
 
 const MAX_ATTACHMENT_BYTES = 7 * 1024 * 1024;
 const messageState: Record<string, string> = {
@@ -125,9 +126,11 @@ export function CrmInbox({
               )}
               {connectionLoading
                 ? "Consultando…"
-                : connection?.connected
-                  ? "Conectado"
-                  : "Não conectado"}
+                : connection?.state === "supervision" && connection.lines
+                  ? `${connection.lines.filter((line) => line.connected).length} de ${connection.lines.length} linhas`
+                  : connection?.connected
+                    ? "Conectado"
+                    : "Não conectado"}
             </span>
           </div>
           <div className="relative">
@@ -192,6 +195,7 @@ export function CrmInbox({
           <p className="text-xs text-muted-foreground">
             {connection?.message || "A conexão WhatsApp ainda não foi consultada."}
           </p>
+          <MyWhatsAppButton />
           {connection?.canManage && (
             <Button asChild size="sm" variant="outline" className="mt-2 w-full">
               <Link to="/interno/crm/integracoes">Configurar WhatsApp</Link>
@@ -351,16 +355,21 @@ function Chat({
     wahaContext.data?.triageReason &&
     wahaContext.data.triageReason !== "multiple_open_opportunities",
   );
-  // WAHA: only the responsible seller replies by default; administrators follow the conversation.
-  const supervisionOnly = connection?.provider === "waha" && connection.canReply === false;
+  // WAHA: each contact is served by the line of its seller (a seller only reaches her own line).
+  const line =
+    connection?.provider === "waha"
+      ? (connection.lines?.find((item) => item.ownerId === customer.ownerId) ??
+        (connection.responsibleId && connection.responsibleId === customer.ownerId
+          ? connection
+          : undefined))
+      : connection;
+  const lineConnected = Boolean(line?.connected);
+  // Only the responsible seller replies by default; administrators follow the conversation.
+  const supervisionOnly = connection?.provider === "waha" && line?.canReply === false;
   const canSend = Boolean(
-    connection?.connected && customer.phone && !identityNeedsReview && !supervisionOnly,
+    lineConnected && customer.phone && !identityNeedsReview && !supervisionOnly,
   );
-  const canSyncHistory =
-    connection?.provider === "waha" &&
-    connection.canSyncConversation === true &&
-    Boolean(connection.responsibleId) &&
-    customer.ownerId === connection.responsibleId;
+  const canSyncHistory = connection?.provider === "waha" && line?.canSyncConversation === true;
   const canSendMedia = canSend && connection?.capabilities?.media === true;
   const sending = busy || uploading;
   const selectFile = (selectedFile: File | undefined) => {
@@ -404,7 +413,7 @@ function Chat({
           <Button
             size="sm"
             variant="outline"
-            disabled={!connection?.connected || syncingHistory}
+            disabled={!lineConnected || syncingHistory}
             title="Busca no WhatsApp o histórico disponível somente desta conversa"
             onClick={async () => {
               setSyncingHistory(true);
@@ -581,7 +590,7 @@ function Chat({
               icon={MessageCircle}
               title="Nenhuma mensagem registrada"
               text={
-                connection?.connected
+                lineConnected
                   ? "Envie a primeira mensagem ou aguarde o contato do cliente."
                   : "O histórico aparecerá quando houver mensagens recebidas pela integração."
               }
@@ -753,9 +762,13 @@ function Chat({
             ? "Supervisão: somente a vendedora responsável responde por este número."
             : !customer.phone
               ? "Complete o telefone na ficha do cliente para enviar mensagens."
-              : connection?.connected
+              : lineConnected
                 ? "Envio pelo WhatsApp conectado. O status confirma o andamento no provedor."
-                : connection?.message || "Configure e conecte o WhatsApp para habilitar o envio."}
+                : connection?.provider === "waha" && !line
+                  ? "A vendedora responsável por este contato não tem uma linha de WhatsApp ativa."
+                  : line?.message ||
+                    connection?.message ||
+                    "Configure e conecte o WhatsApp para habilitar o envio."}
         </p>
         {connection?.capabilities?.media && (
           <p className="mt-1 text-[11px] text-muted-foreground">

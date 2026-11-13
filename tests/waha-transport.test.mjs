@@ -21,7 +21,8 @@ const dho = await actor("dho@waha.example.test", ["dho"]);
 const apiKey = "QA-API-KEY-NEVER-LOG-THIS";
 const hmacKey = "QA-HMAC-KEY-NEVER-LOG-THIS";
 const expectedPhone = "5585999999999";
-const base = { revision: 0, enabled: true, baseUrl: "http://waha.example.test:3000", session: "mag-teste", ownerId: "", expectedPhone: "", apiKey, hmacKey };
+const session = "mag-teste";
+const base = { revision: 0, enabled: true, baseUrl: "http://waha.example.test:3000", apiKey, hmacKey };
 const count = table => Number(db.getDb().prepare(`SELECT count(*) n FROM ${table}`).get().n);
 const originalFetch = globalThis.fetch;
 const calls = [];
@@ -41,7 +42,12 @@ globalThis.fetch = async (url, options = {}) => {
   if (parsed.pathname.startsWith("/api/files/")) return new Response(Buffer.from("%PDF-1.7\nQA document\n%%EOF"), { headers: { "Content-Type": "application/pdf" } });
   throw new Error("Unexpected connector path: " + parsed.pathname);
 };
-const save = patch => waha.saveWahaSettings(admin, { ...base, revision: waha.readWahaSettings(admin).revision, ownerId: seller.id, expectedPhone, ...patch });
+// Shared connector settings; the seller's number is her line (one WAHA session per seller).
+const save = patch => waha.saveWahaSettings(admin, { ...base, revision: waha.readWahaSettings(admin).revision, ...patch });
+const line = async (number = expectedPhone) => {
+  const current = waha.readWahaSettings(admin).lines.find(item => item.userId === seller.id && item.status === "active");
+  return current ? waha.saveWahaLine(admin, { id: current.id, revision: current.revision, userId: seller.id, expectedPhone: number }) : waha.saveWahaLine(admin, { userId: seller.id, expectedPhone: number, session });
+};
 const event = (type, payload, extra = {}) => ({ id: randomUUID(), event: type, session: "mag-teste", me: { id: expectedPhone + "@c.us" }, payload, ...extra });
 const deliver = async (value, headers = {}) => {
   const body = JSON.stringify(value);
@@ -55,23 +61,33 @@ test("settings are isolated, encrypted, admin-only and may leave the seller unse
   assert.throws(() => waha.readWahaSettings(dho), /Forbidden/);
   waha.saveWahaSettings(admin, base);
   const safe = waha.readWahaSettings(admin);
-  assert.equal(safe.ownerId, ""); assert.ok(safe.apiKeyConfigured && safe.hmacKeyConfigured);
+  assert.deepEqual(safe.lines, []); assert.ok(safe.apiKeyConfigured && safe.hmacKeyConfigured);
   assert.ok(!JSON.stringify(safe).includes(apiKey) && !JSON.stringify(safe).includes(hmacKey));
   assert.ok(!String(db.getDb().prepare("SELECT encrypted FROM crm_waha_config").get().encrypted).includes(apiKey));
   const before = calls.length;
-  assert.equal((await waha.readWahaConnection(admin)).state, "owner_required");
+  assert.equal((await waha.readWahaConnection(admin)).state, "line_required");
+  assert.equal((await waha.readWahaConnection(seller)).state, "line_required");
   await assert.rejects(waha.controlWahaSession(admin, { action: "start" }), /vendedora/);
+  await assert.rejects(waha.controlWahaSession(seller, { action: "start" }), /administrador/);
   assert.equal(calls.length, before);
-  save({ expectedPhone: "" });
+  await assert.rejects(waha.saveWahaLine(seller, { userId: seller.id, expectedPhone }), /Forbidden/);
+  await assert.rejects(waha.saveWahaLine(admin, { userId: dho.id, expectedPhone }), /vendedora ativa/);
+  await line("");
   assert.equal((await waha.readWahaConnection(admin)).state, "phone_required");
   await assert.rejects(waha.controlWahaSession(admin, { action: "start" }), /número autorizado/);
-  save({});
+  await line();
   assert.equal((await waha.readWahaConnection(seller)).connected, true);
   assert.equal((await waha.readWahaConnection(other)).connected, false);
+  assert.equal((await waha.readWahaConnection(other)).state, "line_required");
 });
 
 test("session configuration, QR and restart preserve store/webhooks and validate the allowed test number", async () => {
-  await assert.rejects(waha.controlWahaSession(seller, { action: "qr" }), /Forbidden/);
+  // Each seller operates only her own line; "configure" stays administrative.
+  const lineId = waha.readWahaSettings(admin).lines[0].id;
+  await assert.rejects(waha.controlWahaSession(other, { action: "qr" }), /administrador/);
+  await assert.rejects(waha.controlWahaSession(other, { action: "qr", lineId }), /Forbidden/);
+  await assert.rejects(waha.controlWahaSession(dho, { action: "qr", lineId }), /Forbidden/);
+  await assert.rejects(waha.controlWahaSession(seller, { action: "configure" }), /Forbidden/);
   override = async (url, options) => {
     if (url.pathname.endsWith("/auth/qr")) return json({ data: "iVBORw0KGgoAAAANSUhEUg==" });
     if (url.pathname === "/api/sessions/mag-teste" && (!options.method || options.method === "GET")) return json({ status: "SCAN_QR_CODE", config: { metadata: { keep: "yes" }, noweb: { store: { enabled: true, fullSync: false } }, webhooks: [{ url: "http://existing.example.test/hook", events: ["message.any"] }] } });
@@ -79,13 +95,23 @@ test("session configuration, QR and restart preserve store/webhooks and validate
   };
   const qr = await waha.controlWahaSession(admin, { action: "qr" });
   assert.ok(qr.qrCode.startsWith("data:image/png;base64,"));
+  const own = await waha.controlWahaSession(seller, { action: "qr" });
+  assert.ok(own.qrCode.startsWith("data:image/png;base64,"), "the seller reads the QR of her own line");
   await waha.controlWahaSession(admin, { action: "restart" });
   const update = calls.filter(call => call.method === "PUT").at(-1).body.config;
   assert.equal(update.metadata.keep, "yes"); assert.equal(update.noweb.store.enabled, true);
   assert.ok(update.webhooks.some(hook => hook.url === "http://existing.example.test/hook"));
   assert.ok(update.webhooks.some(hook => hook.hmac?.key === hmacKey && hook.events.includes("message.any")));
-  override = async url => url.pathname === "/api/sessions/mag-teste" ? json({ status: "WORKING", me: { id: "5585888888888@c.us" } }) : null;
-  assert.equal((await waha.readWahaConnection(seller)).state, "number_mismatch");
+  override = async (url, options) => {
+    if (url.pathname === "/api/sessions/mag-teste") return json({ status: "WORKING", me: { id: "5585888888888@c.us" } });
+    if (options.method === "POST" && /\/api\/sessions\/mag-teste\/(logout|stop)$/.test(url.pathname)) return json({}, 201);
+    return null;
+  };
+  const unlinked = calls.length;
+  const mismatch = await waha.readWahaConnection(seller);
+  assert.equal(mismatch.state, "number_mismatch");
+  assert.match(mismatch.message, /desfeita automaticamente/);
+  assert.deepEqual(calls.slice(unlinked).filter(call => call.method === "POST").map(call => call.path.split("/").at(-1)), ["logout", "stop"], "a phone that is not the line's number is unlinked at once");
   override = undefined;
 });
 
@@ -178,14 +204,17 @@ test("history is idempotent and does not resurrect unread tasks or change commer
   override = undefined;
 });
 
-test("session names follow the pinned NOWEB DTO instead of accepting invalid local settings", () => {
-  assert.ok(waha.wahaSettingsSchema.safeParse({ ...base, session: "a".repeat(54) }).success);
-  for (const session of ["a".repeat(55), "mag.teste", "mag teste", "mag/teste"])
-    assert.equal(waha.wahaSettingsSchema.safeParse({ ...base, session }).success, false);
+test("session names follow the pinned NOWEB DTO instead of accepting invalid local settings", async () => {
+  const valid = { userId: other.id, expectedPhone: "" };
+  assert.ok(waha.wahaLineSchema.safeParse({ ...valid, session: "a".repeat(54) }).success);
+  for (const name of ["a".repeat(55), "mag.teste", "mag teste", "mag/teste"])
+    assert.equal(waha.wahaLineSchema.safeParse({ ...valid, session: name }).success, false);
+  assert.equal(waha.wahaSettingsSchema.safeParse({ ...base, session }).success, false, "sessions belong to the sellers' lines");
   const previous = waha.readWahaSettings(admin);
-  assert.throws(() => save({ session: "not.allowed" }));
+  await assert.rejects(waha.saveWahaLine(admin, { ...valid, session: "not.allowed" }));
+  await assert.rejects(waha.saveWahaLine(admin, { ...valid, session }), /já foi usado/);
   assert.equal(waha.readWahaSettings(admin).revision, previous.revision);
-  assert.equal(waha.readWahaSettings(admin).session, previous.session);
+  assert.deepEqual(waha.readWahaSettings(admin).lines.map(item => item.session), previous.lines.map(item => item.session));
 });
 
 test("image sends convert to JPEG, voice uses conversion, and audio captions never silently disappear", async () => {
@@ -216,9 +245,9 @@ test("image sends convert to JPEG, voice uses conversion, and audio captions nev
 test("history catalog continues beyond 100 chats while each request processes only one conversation", async () => {
   save({ allowFullHistoryImport: true });
   const database = db.getDb();
-  database.prepare("DELETE FROM crm_waha_history WHERE session=?").run(base.session);
-  database.prepare("DELETE FROM crm_waha_history_scan WHERE session=?").run(base.session);
-  database.prepare("DELETE FROM crm_waha_history_window WHERE session=?").run(base.session);
+  database.prepare("DELETE FROM crm_waha_history WHERE session=?").run(session);
+  database.prepare("DELETE FROM crm_waha_history_scan WHERE session=?").run(session);
+  database.prepare("DELETE FROM crm_waha_history_window WHERE session=?").run(session);
   const chats = Array.from({ length: 101 }, (_, index) => ({ id: `5585988${String(index).padStart(6, "0")}@c.us` }));
   const opportunityCount = count("crm_opportunities"), before = calls.length;
   override = async url => {
@@ -235,7 +264,7 @@ test("history catalog continues beyond 100 chats while each request processes on
     let result = await waha.syncWahaHistory(admin);
     assert.equal(result.chats, 1); assert.equal(result.hasMore, true);
     result = await waha.syncWahaHistory(admin);
-    assert.equal(Number(database.prepare("SELECT count(*) n FROM crm_waha_history WHERE session=?").get(base.session).n), 101);
+    assert.equal(Number(database.prepare("SELECT count(*) n FROM crm_waha_history WHERE session=?").get(session).n), 101);
     for (let index = 0; result.hasMore && index < 102; index++) {
       const messageRequests = calls.filter(call => call.path.endsWith("/messages")).length;
       result = await waha.syncWahaHistory(admin);
@@ -263,7 +292,7 @@ test("history checkpoints retain their cutoff/offset through failure and count o
   try {
     const first = await waha.syncWahaHistory(admin, { chatId, limit: 100 });
     assert.equal(first.processed, 10); assert.equal(first.hasMore, true); assert.equal(observed[0].limit, 10);
-    const checkpoint = () => db.getDb().prepare("SELECT * FROM crm_waha_history WHERE session=? AND chat_id=?").get(base.session, chatId);
+    const checkpoint = () => db.getDb().prepare("SELECT * FROM crm_waha_history WHERE session=? AND chat_id=?").get(session, chatId);
     assert.equal(checkpoint().offset, 10);
     const contactsBefore = calls.filter(call => call.path === "/api/contacts").length;
     fail = true; await assert.rejects(waha.syncWahaHistory(admin, { chatId }), /waha_http_503/);

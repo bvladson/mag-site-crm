@@ -30,7 +30,7 @@ const meLid = "99999999999999@lid";
 const typed = "5585988887777"; // customer as typed by the seller
 const registered = "558588887777"; // customer as registered on WhatsApp
 const lid = "12345678901234@lid";
-const base = { revision: 0, enabled: true, baseUrl: "http://waha.noweb.test:3000", session, apiKey, hmacKey };
+const base = { revision: 0, enabled: true, baseUrl: "http://waha.noweb.test:3000", apiKey, hmacKey };
 const calls = [];
 let sequence = 0;
 let override;
@@ -78,7 +78,8 @@ test("Brazilian 9th-digit spellings are the same line; other numbers stay blocke
   assert.deepEqual(phones.brPhoneVariants("558588887777"), ["558588887777", "5585988887777"]);
   assert.deepEqual(phones.brPhoneVariants("558532221111"), ["558532221111"], "landlines never gain a 9");
   assert.ok(!phones.samePhone("5585988887777", "5585988887778"));
-  waha.saveWahaSettings(admin, { ...base, ownerId: seller.id, expectedPhone: authorized });
+  waha.saveWahaSettings(admin, base);
+  await waha.saveWahaLine(admin, { userId: seller.id, expectedPhone: authorized, session });
   const connection = await waha.readWahaConnection(admin);
   assert.equal(connection.state, "WORKING");
   assert.equal(connection.connected, true);
