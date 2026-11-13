@@ -46,6 +46,8 @@ class SaudeHostTest(unittest.TestCase):
             "MAG_SAUDE_SAIDA": str(self.saida), "MAG_SAUDE_SRV": str(base / "srv"), "MAG_SAUDE_LOGS": str(base / "log"),
             "MAG_SAUDE_FALHAS": str(base / "falhas"), "MAG_SAUDE_VIGIA": str(base / "vigia"),
             "MAG_SAUDE_MANUTENCAO": str(base / "manutencao-inexistente"),
+            "MAG_SAUDE_ESTADO": str(base / "estado" / "alertas.json"),
+            "MAG_SAUDE_ALERT_ENV": str(base / "alert-inexistente.env"),
         })
 
     def tearDown(self):
@@ -89,6 +91,43 @@ class SaudeHostTest(unittest.TestCase):
         self.assertEqual(dados["versao"], 1)
         self.assertTrue(dados["geradoEm"].endswith("Z"))
         self.assertEqual([p.name for p in self.saida.parent.iterdir()], ["saude-host.json"], "sem temporários largados")
+
+    def test_alerta_confirma_antes_lembra_e_avisa_resolvido(self):
+        enviados = []
+        enviar = lambda texto: enviados.append(texto) or True
+        t0 = 1_800_000_000
+        iso = lambda s: self.m.iso(s)
+        ruim = {
+            "disco": {"usoPct": 96, "livreGb": 3.2}, "memoria": {"usoPct": 40},
+            "containers": [{"nome": "mag-site-web-1", "estado": "running", "saude": "healthy"},
+                           {"nome": "mag-waha-waha-1", "estado": "exited", "saude": None},
+                           {"nome": "mag-site-omie-sync-1", "estado": "exited", "saude": None}],
+            "backups": [{"projeto": "mag-site", "ultimo": iso(t0 - 3600)}, {"projeto": "mag-whatsapp", "ultimo": iso(t0 - 30 * 3600)}],
+        }
+        self.assertEqual(self.m.alertar(ruim, t0, enviar), [], "primeira conferência só anota")
+        primeira = self.m.alertar(ruim, t0 + 300, enviar)
+        self.assertEqual(sorted(primeira), sorted([
+            "ALERTA MAG: Disco da VPS com 96% de uso (3.2 GB livres).",
+            "ALERTA MAG: mag-waha-waha-1: parado (exited).",
+            "ALERTA MAG: Backup de mag-whatsapp não rodou nas últimas 26 h.",
+        ]), "sincronização (omie-sync) parada não é essencial")
+        self.assertEqual(self.m.alertar(ruim, t0 + 600, enviar), [], "não repete")
+        lembrete = self.m.alertar(ruim, t0 + 300 + 6 * 3600, enviar)
+        self.assertTrue(lembrete and all(m.startswith("Continua: ") for m in lembrete))
+        bom = {"disco": {"usoPct": 50, "livreGb": 40}, "memoria": {"usoPct": 40},
+               "containers": [{"nome": "mag-waha-waha-1", "estado": "running", "saude": "healthy"}],
+               "backups": [{"projeto": "mag-site", "ultimo": iso(t0 + 7 * 3600)}, {"projeto": "mag-whatsapp", "ultimo": iso(t0 + 7 * 3600)}]}
+        resolvido = self.m.alertar(bom, t0 + 7 * 3600, enviar)
+        self.assertEqual(len(resolvido), 3)
+        self.assertTrue(all(m.startswith("Resolvido: ") for m in resolvido))
+        self.assertEqual(self.m.alertar(bom, t0 + 8 * 3600, enviar), [])
+
+    def test_sem_token_nao_envia_e_nao_quebra(self):
+        self.assertFalse(self.m.enviar_telegram("teste"))
+        ruim = {"disco": {"usoPct": 99, "livreGb": 1}, "backups": []}
+        self.m.alertar(ruim, 1_800_000_000)
+        self.assertEqual(self.m.alertar(ruim, 1_800_000_300), ["ALERTA MAG: Disco da VPS com 99% de uso (1 GB livres)."],
+                         "sem token a mensagem não sai, mas o estado segue e tenta de novo")
 
     def test_docker_indisponivel_nao_derruba_a_coleta(self):
         def falha(*args, **kwargs):

@@ -5,4 +5,5 @@
 # "sem dados do servidor" e nada mais muda).
 SHELL=/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-*/5 * * * * root /opt/mag-site/bin/saude-host.py >>/var/log/mag-site-saude.log 2>&1
+# --alertar: Telegram (alert.env) para disco ≥ 90%, memória ≥ 95%, contêiner essencial parado e backup que não rodou.
+*/5 * * * * root /opt/mag-site/bin/saude-host.py --alertar >>/var/log/mag-site-saude.log 2>&1
