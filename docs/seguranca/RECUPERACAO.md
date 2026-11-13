@@ -32,11 +32,15 @@ Complementa `deploy/srv/RESTORE.md` (procedimento completo, que vai dentro de to
 3. **Painel "Saúde do sistema":** mostra o último backup de cada projeto, a falha pendente e o vigia do WhatsApp. Backup
    com mais de 26 h ou com falha aparece como **crítico**.
 
-## Esta etapa (módulo 1) e a volta
+## Etapas 1 e 2 e a volta
 
-- **Sem mudança de estrutura no banco.** Regra de carteira, novos registros de auditoria e painel de saúde não criam
-  nem alteram tabelas. Voltar para a release anterior não exige nada no banco; os registros de auditoria novos ficam
-  guardados e não atrapalham.
+- **Etapa 1 sem mudança de estrutura no banco.** Regra de carteira, novos registros de auditoria e painel de saúde
+  não criam nem alteram tabelas.
+- **Etapa 2: uma tabela nova, `crm_opportunity_drafts`** (rascunho do catálogo), criada na primeira vez que alguém
+  usa o rascunho. A versão anterior simplesmente não a lê. Os itens que já foram para uma negociação continuam lá,
+  com preço definido no editor.
+- Voltar para a release anterior não exige nada no banco. Os registros de auditoria novos ficam guardados e não
+  atrapalham.
 - **Cron da saúde:** remover `/etc/cron.d/mag-site-saude` desliga a coleta. O painel passa a avisar "sem dados do
   servidor" e nada mais muda.
 - **Base da linha principal (multiusuário v2.1):** as tabelas das linhas de WhatsApp são criadas na primeira leitura,
