@@ -118,6 +118,10 @@ test("ACKs addressed by LID update the message sent to the phone address", async
 });
 
 test("inbound LID messages use remoteJidAlt, reach the typed contact and are received", async () => {
+  // The inbound is a reply after our send. NOWEB timestamps have second precision while the
+  // API send is recorded with milliseconds; establish that ordering explicitly in the fixture.
+  db.getDb().prepare("UPDATE crm_messages SET sent_at=? WHERE external_id='true_3EB0NOWEB1'")
+    .run(new Date((Math.floor(Date.now() / 1000) - 2) * 1000).toISOString());
   const before = calls.length;
   await deliver("message.any", { id: `false_${lid}_3EB0IN0001`, timestamp: Math.floor(Date.now() / 1000), from: lid, fromMe: false, source: "app", body: "Recebido MAG", hasMedia: false, media: null, ack: 2, ackName: "DEVICE", _data: { key: { remoteJid: lid, remoteJidAlt: `${registered}@s.whatsapp.net`, fromMe: false, id: "3EB0IN0001" }, pushName: "Cliente", message: { extendedTextMessage: {} } } });
   const row = message("false_3EB0IN0001");

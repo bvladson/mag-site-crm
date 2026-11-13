@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRouterState } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
 import type {
@@ -15,6 +16,8 @@ import {
   createOpportunity,
   createQuoteForOpportunity,
   getCrmBootstrap,
+  getCrmContact,
+  getCrmOpportunity,
   importSiteLead,
   moveOpportunity,
   scheduleTask,
@@ -38,6 +41,7 @@ export type CrmDialog =
   | null;
 const QUERY_KEY = ["interno", "crm"] as const;
 interface CrmStore extends CrmBootstrap {
+  viewerId: string;
   dialog: CrmDialog;
   busy: boolean;
   connection:
@@ -80,6 +84,9 @@ interface CrmStore extends CrmBootstrap {
       }
     | undefined;
   connectionLoading: boolean;
+  entityLoading: boolean;
+  entityError: unknown;
+  contactOpportunitiesTruncated: boolean;
   open: (dialog: CrmDialog) => void;
   close: () => void;
   contact: (id: string) => CrmBootstrap["contacts"][number] | undefined;
@@ -115,7 +122,15 @@ interface CrmStore extends CrmBootstrap {
   ) => Promise<void>;
   importLead: (sourceKind: "quote" | "contact", sourceId: string) => Promise<string>;
   createQuote: (id: string) => Promise<{ id: string; detailUrl: string }>;
-  attachQuote: (id: string, quoteId: string) => Promise<void>;
+  attachQuote: (
+    id: string,
+    quoteId: string,
+    confirmation?: {
+      confirmMismatch?: boolean;
+      justification?: string;
+      confirmationToken?: string;
+    },
+  ) => Promise<void>;
   sendMessage: (
     contactId: string,
     text: string,
@@ -133,6 +148,9 @@ export function CrmProvider({ children }: { children: ReactNode }) {
   const me = useMe();
   const allowed = me.data?.roles.some((role) => role === "admin" || role === "comercial") ?? false;
   const load = useServerFn(getCrmBootstrap);
+  const loadContact = useServerFn(getCrmContact);
+  const loadOpportunity = useServerFn(getCrmOpportunity);
+  const location = useRouterState({ select: (state) => state.location });
   const getConnection = useServerFn(getCrmConnection);
   const addContact = useServerFn(createContact);
   const editContact = useServerFn(updateContact);
@@ -155,6 +173,59 @@ export function CrmProvider({ children }: { children: ReactNode }) {
     enabled: allowed,
     refetchInterval: 30_000,
     staleTime: 10_000,
+  });
+  const search = location.search as Record<string, unknown>;
+  const routeContactId = location.pathname.includes("/crm/atendimento")
+    ? search["c"]
+    : location.pathname.includes("/crm/clientes")
+      ? search["id"]
+      : undefined;
+  const routeOpportunityId = location.pathname.includes("/crm/atendimento")
+    ? search["o"]
+    : undefined;
+  const dialogOpportunityId =
+    dialog &&
+    ["opportunity", "schedule", "loss", "close", "createProposal"].includes(dialog.kind) &&
+    "id" in dialog
+      ? dialog.id
+      : undefined;
+  const focusedOpportunityId =
+    dialogOpportunityId ||
+    (typeof routeOpportunityId === "string" ? routeOpportunityId : undefined);
+  const focusedOpportunity = useQuery({
+    queryKey: [...QUERY_KEY, "focused-opportunity", me.data?.id, focusedOpportunityId],
+    queryFn: () => loadOpportunity({ data: { id: focusedOpportunityId! } }),
+    enabled:
+      allowed &&
+      Boolean(
+        query.data &&
+        focusedOpportunityId &&
+        !query.data.opportunities.some((item) => item.id === focusedOpportunityId),
+      ),
+    retry: 1,
+    staleTime: 5_000,
+  });
+  const opportunityContactId =
+    focusedOpportunity.data?.contactId ||
+    query.data?.opportunities.find((item) => item.id === focusedOpportunityId)?.contactId;
+  const dialogContactId =
+    dialog?.kind === "contact"
+      ? dialog.id
+      : dialog?.kind === "newOpportunity"
+        ? dialog.contactId
+        : dialogOpportunityId
+          ? opportunityContactId
+          : undefined;
+  const focusedContactId =
+    dialogContactId ||
+    (typeof routeContactId === "string" ? routeContactId : undefined) ||
+    opportunityContactId;
+  const focusedContact = useQuery({
+    queryKey: [...QUERY_KEY, "focused-contact", me.data?.id, focusedContactId],
+    queryFn: () => loadContact({ data: { id: focusedContactId! } }),
+    enabled: allowed && Boolean(query.data && focusedContactId),
+    retry: 1,
+    staleTime: 5_000,
   });
   const connection = useQuery({
     queryKey: [...QUERY_KEY, "connection"],
@@ -189,7 +260,32 @@ export function CrmProvider({ children }: { children: ReactNode }) {
   if (query.isError || !query.data)
     return <ErrorState error={query.error ?? new Error("Não foi possível carregar o CRM.")} />;
   const data = query.data;
-  const opportunity = (id: string) => data.opportunities.find((item) => item.id === id);
+  const contactMap = new Map(data.contacts.map((item) => [item.id, item]));
+  if (focusedContact.data) {
+    const item = focusedContact.data.contact;
+    const previous = contactMap.get(item.id);
+    if (!previous || item.revision >= previous.revision) contactMap.set(item.id, item);
+  }
+  const contacts = [...contactMap.values()];
+  const opportunityMap = new Map(data.opportunities.map((item) => [item.id, item]));
+  for (const item of [
+    ...(focusedContact.data?.opportunities ?? []),
+    ...(focusedOpportunity.data ? [focusedOpportunity.data] : []),
+  ]) {
+    const previous = opportunityMap.get(item.id);
+    if (!previous || item.revision >= previous.revision) opportunityMap.set(item.id, item);
+  }
+  const opportunities = [...opportunityMap.values()];
+  const focusedConversations = focusedContact.data ? [focusedContact.data.conversation] : [];
+  const conversations = [
+    ...new Map(
+      (focusedContact.dataUpdatedAt >= query.dataUpdatedAt
+        ? [...data.conversations, ...focusedConversations]
+        : [...focusedConversations, ...data.conversations]
+      ).map((item) => [item.contactId, item]),
+    ).values(),
+  ];
+  const opportunity = (id: string) => opportunityMap.get(id);
   const requireOpportunity = (id: string) => {
     const found = opportunity(id);
     if (!found) throw new Error("Oportunidade não encontrada. Atualize a página.");
@@ -207,6 +303,10 @@ export function CrmProvider({ children }: { children: ReactNode }) {
   };
   const store: CrmStore = {
     ...data,
+    viewerId: me.data?.id ?? "",
+    contacts,
+    opportunities,
+    conversations,
     dialog,
     busy,
     connection: connection.isError
@@ -219,11 +319,14 @@ export function CrmProvider({ children }: { children: ReactNode }) {
         }
       : connection.data,
     connectionLoading: connection.isLoading,
+    entityLoading: focusedContact.isLoading || focusedOpportunity.isLoading,
+    entityError: focusedContact.error || focusedOpportunity.error,
+    contactOpportunitiesTruncated: focusedContact.data?.opportunitiesTruncated ?? false,
     open: setDialog,
     close: () => {
       if (!busy) setDialog(null);
     },
-    contact: (id) => data.contacts.find((item) => item.id === id),
+    contact: (id) => contacts.find((item) => item.id === id),
     opportunity,
     requestMove: async (id, stage) => {
       const current = opportunity(id);
@@ -267,9 +370,9 @@ export function CrmProvider({ children }: { children: ReactNode }) {
     },
     createQuote: async (id) =>
       run(() => newQuote({ data: { opportunityId: id } }), "Negociação pronta no gerencial"),
-    attachQuote: async (id, quoteId) => {
+    attachQuote: async (id, quoteId, confirmation) => {
       await run(
-        () => attachQuote({ data: { opportunityId: id, quoteId } }),
+        () => attachQuote({ data: { opportunityId: id, quoteId, ...confirmation } }),
         "Negociação vinculada",
       );
     },

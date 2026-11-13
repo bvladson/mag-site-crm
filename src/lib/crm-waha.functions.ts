@@ -2,6 +2,36 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 const admin = async () => (await import("./local-auth.server")).authorize(["admin"]);
 const user = async () => (await import("./local-auth.server")).authorize(["admin", "comercial"]);
+/** Browses existing WhatsApp conversations; no implicit history or lead import. */
+export const getWahaContactCatalog = createServerFn({ method: "GET" })
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        lineId: z.string().uuid().optional(),
+        search: z.string().trim().max(200).optional(),
+        before: z.string().max(2048).optional(),
+        limit: z.number().int().min(1).max(50).optional(),
+      })
+      .strict()
+      .parse(input ?? {}),
+  )
+  .handler(async ({ data }) =>
+    (await import("./crm-waha.server")).readWahaContactCatalog(await user(), data),
+  );
+export const importWahaContact = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        lineId: z.string().uuid().optional(),
+        chatId: z.string().max(200),
+        selectionToken: z.string().min(1).max(4096),
+      })
+      .strict()
+      .parse(input),
+  )
+  .handler(async ({ data }) =>
+    (await import("./crm-waha.server")).importWahaContact(await user(), data),
+  );
 export const getWahaContactContext = createServerFn({ method: "GET" })
   .inputValidator((input: unknown) =>
     z.object({ contactId: z.string().uuid() }).strict().parse(input),
@@ -80,6 +110,12 @@ export const setWahaLineStatus = createServerFn({ method: "POST" })
 export const getWahaConnection = createServerFn({ method: "GET" }).handler(async () =>
   (await import("./crm-waha.server")).readWahaConnection(await user()),
 );
+export const getWahaOutbox = createServerFn({ method: "GET" })
+  .inputValidator((input: unknown) => z.object({ contactId: z.string().uuid().optional(), lineId: z.string().uuid().optional() }).strict().parse(input ?? {}))
+  .handler(async ({ data }) => (await import("./crm-waha.server")).readWahaOutbox(await user(), data));
+export const retryWahaRecovery = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => z.object({ lineId: z.string().uuid().optional() }).strict().parse(input ?? {}))
+  .handler(async ({ data }) => (await import("./crm-waha.server")).retryWahaRecovery(await user(), data));
 /** Sellers connect, read the QR, reconnect and disconnect their own line; administrators any line. */
 export const controlWahaSession = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) =>

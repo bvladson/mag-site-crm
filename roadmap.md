@@ -1,0 +1,15 @@
+# Roadmap
+- [x] Galeria por SKU (images[])
+- [x] Ocultar seções sem dados reais
+- [x] Gaveta de categorias no mobile
+- [x] Estoque em 3 estados
+- [x] Banner de cookies
+- [x] Orçamentos salvos no Cloud (protocolo, itens, UTM)
+- [x] Candidatura + banco de talentos com PDF e LGPD
+- [x] Busca com sugestões e tolerância a erro
+- [x] SEO: canonical, JSON-LD, sitemap.xml dinâmico
+- [x] Instruções VPS (DEPLOY-VPS.md)
+- [ ] Segunda passada visual da Home (direção de arte) — próxima rodada
+- [ ] Aviso por e-mail ao comercial/DHO — precisa do e-mail oficial
+- [ ] Painel para ver orçamentos/candidaturas — próxima rodada
+- [ ] Omie — aguarda credenciais

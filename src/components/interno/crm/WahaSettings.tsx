@@ -352,9 +352,7 @@ export function WahaSettings() {
             onChanged={invalidate}
           />
           <details className="space-y-3 border-t pt-3">
-            <summary className="cursor-pointer text-sm font-medium">
-              Recebimento e eventos
-            </summary>
+            <summary className="cursor-pointer text-sm font-medium">Recebimento e eventos</summary>
             <div className="flex items-center gap-2 rounded-md border p-3">
               <code className="min-w-0 flex-1 break-all text-xs">{data.webhookUrl}</code>
               <Button
@@ -458,7 +456,9 @@ function WahaLines({
     }
   };
   const states = new Map((live || []).map((line) => [line.lineId, line]));
-  const withLine = new Set(data.lines.filter((line) => line.status === "active").map((line) => line.userId));
+  const withLine = new Set(
+    data.lines.filter((line) => line.status === "active").map((line) => line.userId),
+  );
   const available = owners.filter((owner) => !withLine.has(owner.id));
   return (
     <div className="space-y-3">
@@ -471,7 +471,8 @@ function WahaLines({
       <ul className="space-y-2" aria-label="Linhas de WhatsApp">
         {data.lines.map((line) => {
           const state = states.get(line.id);
-          const current = line.status === "disabled" ? "disabled" : state?.state || line.lastState || "STOPPED";
+          const current =
+            line.status === "disabled" ? "disabled" : state?.state || line.lastState || "STOPPED";
           return (
             <li key={line.id} className="space-y-3 rounded-md border p-3" data-crm-waha-line>
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -479,7 +480,8 @@ function WahaLines({
                   <p className="font-medium">{line.ownerName}</p>
                   <p className="text-xs text-muted-foreground">
                     {line.expectedPhone ? formatPhone(line.expectedPhone) : "Número não informado"}
-                    {line.history && ` · ${line.history.processed} mensagem(ns) de histórico importada(s)`}
+                    {line.history &&
+                      ` · ${line.history.processed} mensagem(ns) de histórico importada(s)`}
                   </p>
                 </div>
                 <span
@@ -519,7 +521,9 @@ function WahaLines({
                       disabled={busy || disabled}
                       onClick={() =>
                         setEditing(
-                          editing?.id === line.id ? null : { id: line.id, phone: line.expectedPhone },
+                          editing?.id === line.id
+                            ? null
+                            : { id: line.id, phone: line.expectedPhone },
                         )
                       }
                     >
@@ -576,7 +580,11 @@ function WahaLines({
                 )}
               </div>
               {confirmDisable === line.id && (
-                <div role="alertdialog" aria-label="Confirmar desativação" className="space-y-2 rounded-md border p-3 text-sm">
+                <div
+                  role="alertdialog"
+                  aria-label="Confirmar desativação"
+                  className="space-y-2 rounded-md border p-3 text-sm"
+                >
                   <p>
                     Desativar a linha de {line.ownerName}? O WhatsApp é desconectado do CRM e a
                     vendedora não conecta mais por esta linha. Conversas, contatos e oportunidades
@@ -601,7 +609,12 @@ function WahaLines({
                     >
                       Desativar agora
                     </Button>
-                    <Button type="button" size="sm" variant="ghost" onClick={() => setConfirmDisable(null)}>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setConfirmDisable(null)}
+                    >
                       Cancelar
                     </Button>
                   </div>
@@ -682,7 +695,9 @@ function WahaLines({
             className="h-10 w-full rounded-md border bg-card px-3 text-sm"
             value={adding.userId}
             disabled={busy || disabled}
-            onChange={(event) => setAdding((current) => ({ ...current, userId: event.target.value }))}
+            onChange={(event) =>
+              setAdding((current) => ({ ...current, userId: event.target.value }))
+            }
           >
             <option value="">Selecione a vendedora</option>
             {available.map((owner) => (
@@ -700,7 +715,9 @@ function WahaLines({
             disabled={busy || disabled}
             maxLength={30}
             placeholder="DDI + DDD + número"
-            onChange={(event) => setAdding((current) => ({ ...current, phone: event.target.value }))}
+            onChange={(event) =>
+              setAdding((current) => ({ ...current, phone: event.target.value }))
+            }
           />
         </label>
         <Button type="submit" disabled={busy || disabled || !adding.userId}>

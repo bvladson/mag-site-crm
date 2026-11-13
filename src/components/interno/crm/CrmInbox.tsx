@@ -8,7 +8,6 @@ import {
   FileText,
   IdCard,
   MessageCircle,
-  Search,
   Send,
   WifiOff,
   Wifi,
@@ -33,15 +32,19 @@ import { cn } from "@/lib/utils";
 import { proposalsFor, useCrm } from "./CrmProvider";
 import { Avatar, EmptyState, NextActionLine, OriginBadge, ProposalBadge, StageBadge } from "./bits";
 import { money, normalize, relative, time } from "./format";
-import { getCrmConversationPage } from "@/lib/crm.functions";
+import { getCrmConversationPage, getCrmContactsPage } from "@/lib/crm.functions";
+import { Loading } from "@/components/interno/ui";
 import type { Message } from "@/lib/crm";
 import { MessageMedia, mediaSize } from "./MessageMedia";
 import {
   bindWahaContactOpportunity,
   getWahaContactContext,
   syncWahaContactHistory,
+  getWahaOutbox,
 } from "@/lib/crm-waha.functions";
 import { MyWhatsAppButton } from "./WahaLinePanel";
+import { ContactMatchHint, ContactSearch, ContactSearchPreparing } from "./ContactSearch";
+import { WahaContactsButton } from "./WahaContactsDialog";
 
 const MAX_ATTACHMENT_BYTES = 7 * 1024 * 1024;
 const messageState: Record<string, string> = {
@@ -64,9 +67,38 @@ export function CrmInbox({
   selectedOpportunity: string | undefined;
 }) {
   const navigate = useNavigate();
-  const { contacts, conversations, opportunities, connection, connectionLoading, markRead } =
-    useCrm();
+  const { contacts, conversations, connection, connectionLoading, markRead, viewerId } = useCrm();
   const [query, setQuery] = useState("");
+  const [search, setSearch] = useState("");
+  const [searchMode, setSearchMode] = useState<"contacts" | "all">("contacts");
+  const pollingStartedAt = useRef(Date.now());
+  useEffect(() => {
+    pollingStartedAt.current = Date.now();
+  }, [search, searchMode]);
+  const loadContacts = useServerFn(getCrmContactsPage);
+  useEffect(() => {
+    const timer = setTimeout(() => setSearch(query.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [query]);
+  const pages = useInfiniteQuery({
+    queryKey: ["interno", "crm", "inbox-contacts", viewerId, search, searchMode],
+    queryFn: ({ pageParam }) =>
+      loadContacts({
+        data: { search, searchMode, limit: 50, ...(pageParam ? { before: pageParam } : {}) },
+      }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (page) => (page.hasMore ? page.nextCursor : undefined),
+    refetchInterval: (query) =>
+      searchMode === "all" &&
+      Boolean(search) &&
+      query.state.data?.pages.some((page) => page.searchIndex?.ready === false)
+        ? Date.now() - pollingStartedAt.current < 60_000 && query.state.data.pages.length === 1
+          ? 2_000
+          : false
+        : 15_000,
+    staleTime: 5_000,
+    retry: 1,
+  });
   const [cardOpen, setCardOpen] = useState(false);
   const unread = conversations
     .filter((item) => item.contactId === selected)
@@ -78,30 +110,40 @@ export function CrmInbox({
   }, [selected, unread]);
   const select = (id?: string) =>
     navigate({ to: "/interno/crm/atendimento", search: id ? { c: id } : {} });
-  const rows = contacts
-    .map((customer) => {
-      const threads = conversations.filter((item) => item.contactId === customer.id);
-      const messages = threads
-        .flatMap((item) => item.messages)
-        .sort((a, b) => a.at.localeCompare(b.at));
-      return {
-        customer,
-        unread: threads.reduce((sum, item) => sum + item.unread, 0),
-        last: messages.at(-1),
-        messages,
-      };
-    })
-    .filter(
-      ({ customer, messages }) =>
-        !query ||
-        normalize(
-          `${customer.name} ${customer.company ?? ""} ${customer.phone} ${opportunities
-            .filter((item) => item.contactId === customer.id)
-            .map((item) => item.interest)
-            .join(" ")} ${messages.map((item) => item.text).join(" ")}`,
-        ).includes(normalize(query)),
-    )
-    .sort((a, b) => (b.last?.at ?? "").localeCompare(a.last?.at ?? ""));
+  const pageContacts = [
+    ...new Map(
+      (pages.data?.pages.flatMap((page) => page.contacts) ?? []).map((item) => [item.id, item]),
+    ).values(),
+  ];
+  const summaries = new Map(
+    (pages.data?.pages.flatMap((page) => page.conversations) ?? []).map((item) => [
+      item.contactId,
+      item,
+    ]),
+  );
+  const matches = new Map(
+    pages.data?.pages.flatMap((page) => Object.entries(page.matches ?? {})) ?? [],
+  );
+  const preparingSearch =
+    pages.data?.pages.some((page) => page.searchIndex?.ready === false) ?? false;
+  const selectedContact = contacts.find((item) => item.id === selected);
+  const visibleContacts =
+    !search && selectedContact && !pageContacts.some((item) => item.id === selected)
+      ? [selectedContact, ...pageContacts]
+      : pageContacts;
+  const rows = visibleContacts.map((customer) => {
+    const thread =
+      summaries.get(customer.id) ?? conversations.find((item) => item.contactId === customer.id);
+    const messages = thread?.messages ?? [];
+    return {
+      customer,
+      unread: thread?.unread ?? 0,
+      last: messages.at(-1),
+      messages,
+    };
+  });
+  // A searched page is ranked by the server; a local activity sort would hide its best matches.
+  if (!search) rows.sort((a, b) => (b.last?.at ?? "").localeCompare(a.last?.at ?? ""));
   return (
     <div className="crm-inbox flex">
       <aside
@@ -133,19 +175,35 @@ export function CrmInbox({
                     : "Não conectado"}
             </span>
           </div>
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              aria-label="Buscar atendimentos"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Nome, telefone ou interesse"
-              className="pl-9"
+          <ContactSearch
+            label="Buscar atendimentos"
+            value={query}
+            onChange={setQuery}
+            mode={searchMode}
+            onModeChange={setSearchMode}
+          />
+          <WahaContactsButton destination="inbox" className="w-full" />
+          {preparingSearch && (
+            <ContactSearchPreparing
+              refreshing={pages.isFetching}
+              onRefresh={() => {
+                pollingStartedAt.current = Date.now();
+                void pages.refetch();
+              }}
             />
-          </div>
+          )}
         </div>
         <ul className="flex-1 overflow-y-auto">
-          {rows.length ? (
+          {pages.isLoading ? (
+            <li className="p-4 text-sm text-muted-foreground">Carregando atendimentos…</li>
+          ) : pages.isError ? (
+            <li role="alert" className="space-y-2 p-4 text-sm text-destructive">
+              <p>Não foi possível buscar atendimentos.</p>
+              <Button size="sm" variant="outline" onClick={() => void pages.refetch()}>
+                Tentar novamente
+              </Button>
+            </li>
+          ) : rows.length ? (
             rows.map(({ customer, unread: count, last }) => (
               <li key={customer.id}>
                 <button
@@ -168,6 +226,7 @@ export function CrmInbox({
                         </span>
                       )}
                     </div>
+                    {search && <ContactMatchHint match={matches.get(customer.id)} />}
                     <div className="mt-0.5 flex items-center justify-between gap-2">
                       <span className="truncate text-sm text-muted-foreground">
                         {last?.from === "vendedora" && "Você: "}
@@ -188,6 +247,19 @@ export function CrmInbox({
               {query
                 ? "Nenhum atendimento neste filtro."
                 : "Os clientes e as conversas recebidas aparecerão aqui."}
+            </li>
+          )}
+          {pages.hasNextPage && (
+            <li className="p-3 text-center">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={pages.isFetchingNextPage || preparingSearch}
+                onClick={() => void pages.fetchNextPage()}
+              >
+                {pages.isFetchingNextPage && <Loader2 className="size-3 animate-spin" />}Carregar
+                mais atendimentos
+              </Button>
             </li>
           )}
         </ul>
@@ -256,12 +328,23 @@ function Chat({
   onBack: () => void;
   onCard: () => void;
 }) {
-  const { contact, opportunities, connection, sendMessage, busy, open, markRead } = useCrm();
+  const {
+    contact,
+    opportunities,
+    connection,
+    sendMessage,
+    busy,
+    open,
+    markRead,
+    entityLoading,
+    viewerId,
+  } = useCrm();
   const customer = contact(contactId);
   const getHistory = useServerFn(getCrmConversationPage);
   const readContext = useServerFn(getWahaContactContext);
   const bindContext = useServerFn(bindWahaContactOpportunity);
   const syncContactHistory = useServerFn(syncWahaContactHistory);
+  const readOutbox = useServerFn(getWahaOutbox);
   const [syncingHistory, setSyncingHistory] = useState(false);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -274,6 +357,13 @@ function Chat({
     enabled: Boolean(customer),
     refetchInterval: 5_000,
     staleTime: 3_000,
+    retry: 1,
+  });
+  const outbox = useQuery({
+    queryKey: ["interno", "crm", "outbox", viewerId, contactId],
+    queryFn: () => readOutbox({ data: { contactId } }),
+    enabled: Boolean(customer) && connection?.provider === "waha",
+    refetchInterval: 15_000,
     retry: 1,
   });
   const messages = [
@@ -336,6 +426,7 @@ function Chat({
     setFilePreview(url);
     return () => URL.revokeObjectURL(url);
   }, [file]);
+  if (!customer && entityLoading) return <Loading />;
   if (!customer)
     return (
       <div className="p-6">
@@ -447,6 +538,14 @@ function Chat({
           </Button>
         )}
       </header>
+      {outbox.data?.items.some(
+        (item) => item.state === "uncertain" || item.state === "sending" || item.errorCode,
+      ) && (
+        <div role="alert" className="crm-warning border-b px-3 py-2 text-xs md:px-4">
+          Há envio(s) sem confirmação ou com falha neste atendimento. Confira a conversa e o
+          aparelho antes de enviar novamente. O CRM não faz reenvio automático.
+        </div>
+      )}
       {wahaContext.data && (
         <div className="space-y-1 border-b bg-card px-3 py-2 text-xs md:px-4">
           {identityNeedsReview ? (

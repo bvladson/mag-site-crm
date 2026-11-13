@@ -1,0 +1,1 @@
+DELETE FROM public.quote_requests WHERE email = 'qa@teste.com'; DELETE FROM public.job_applications WHERE email = 'qa@teste.com';

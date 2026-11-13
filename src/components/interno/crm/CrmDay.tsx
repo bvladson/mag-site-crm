@@ -28,24 +28,42 @@ export function CrmDay() {
     tasks,
     finishTask,
     canManage,
+    counts,
   } = useCrm();
   const navigate = useNavigate();
   const waiting = proposals.filter((item) => item.status === "Enviada").length;
   const returns = tasks.filter((item) => item.status === "pending" && isDueTodayOrLate(item.due));
   const queue = opportunities
-    .filter((item) => item.awaitingReply || isDueTodayOrLate(item.nextAction.due))
+    .filter(
+      (item) =>
+        !["fechado", "perdido"].includes(item.stage) &&
+        (item.awaitingReply || isDueTodayOrLate(item.nextAction.due)),
+    )
     .sort(
       (a, b) =>
         Number(b.awaitingReply) - Number(a.awaitingReply) ||
         a.nextAction.due.localeCompare(b.nextAction.due),
     );
   const entries = siteLeads.filter((item) => !item.importedOpportunityId);
+  const unreadContacts = new Set(
+    conversations.filter((item) => item.unread > 0).map((item) => item.contactId),
+  );
+  const awaitingContacts = new Set([
+    ...unreadContacts,
+    ...opportunities
+      .filter((item) => item.awaitingReply && !["fechado", "perdido"].includes(item.stage))
+      .map((item) => item.contactId),
+  ]);
+  const awaitingCount = counts.awaitingContacts ?? awaitingContacts.size;
+  // A conversation needs attention even before the seller chooses its opportunity.
+  const triage = conversations.filter(
+    (item) =>
+      item.unread > 0 && !queue.some((opportunity) => opportunity.contactId === item.contactId),
+  );
   const stats = [
     {
       label: "A responder",
-      value: new Set(
-        opportunities.filter((item) => item.awaitingReply).map((item) => item.contactId),
-      ).size,
+      value: awaitingCount,
       icon: MessageCircle,
       to: "/interno/crm/atendimento" as const,
       tone: "crm-brand",
@@ -110,10 +128,10 @@ export function CrmDay() {
         <div className="mb-3 flex items-center justify-between gap-2">
           <h2 className="text-lg font-semibold">Fila de hoje</h2>
           <span className="text-sm text-muted-foreground">
-            {queue.length} {queue.length === 1 ? "item" : "itens"}
+            {queue.length + triage.length} {queue.length + triage.length === 1 ? "item" : "itens"}
           </span>
         </div>
-        {queue.length === 0 ? (
+        {queue.length === 0 && triage.length === 0 && awaitingCount === 0 ? (
           <EmptyState
             icon={CheckCircle2}
             title="Tudo em dia"
@@ -126,6 +144,38 @@ export function CrmDay() {
           />
         ) : (
           <ul className="crm-card divide-y overflow-hidden rounded-xl border bg-card">
+            {triage.map((thread) => {
+              const customer = contact(thread.contactId);
+              if (!customer) return null;
+              return (
+                <li
+                  key={`triage-${thread.contactId}`}
+                  className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center"
+                >
+                  <div className="flex min-w-0 flex-1 items-start gap-3">
+                    <Avatar name={customer.name} />
+                    <div className="min-w-0 space-y-1">
+                      <p className="font-semibold">{customer.name}</p>
+                      <p className="text-sm font-medium text-primary">
+                        Mensagem recebida aguardando atendimento
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        Abra a conversa para responder ou escolher a oportunidade deste atendimento.
+                      </p>
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    onClick={() =>
+                      navigate({ to: "/interno/crm/atendimento", search: { c: customer.id } })
+                    }
+                  >
+                    <Reply />
+                    Atender
+                  </Button>
+                </li>
+              );
+            })}
             {queue.map((item) => {
               const customer = contact(item.contactId);
               if (!customer) return null;
@@ -141,7 +191,7 @@ export function CrmDay() {
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-semibold">{customer.name}</span>
                         <StageBadge stage={item.stage} />
-                        {item.awaitingReply && (
+                        {(item.awaitingReply || unreadContacts.has(item.contactId)) && (
                           <span className="text-xs font-semibold text-primary">
                             Aguardando resposta
                           </span>
@@ -194,6 +244,14 @@ export function CrmDay() {
                 </li>
               );
             })}
+            {awaitingCount > awaitingContacts.size && (
+              <li className="p-4 text-sm text-muted-foreground">
+                Há outros atendimentos pendentes além deste resumo.{" "}
+                <Link to="/interno/crm/atendimento" className="font-medium text-primary underline">
+                  Consultar Atendimento
+                </Link>
+              </li>
+            )}
           </ul>
         )}
       </section>
@@ -245,7 +303,9 @@ export function CrmDay() {
                     try {
                       const id = await importLead(entry.sourceKind, entry.sourceId);
                       open({ kind: "opportunity", id });
-                    } catch {}
+                    } catch {
+                      // O CRM apresenta a falha da ação e mantém o formulário aberto.
+                    }
                   }}
                 >
                   Trazer para o CRM

@@ -31,6 +31,18 @@ export const getCrmBootstrap = createServerFn({ method: "GET" }).handler(async (
   const { getCrmBootstrap: run } = await import("./crm.server");
   return run(await actor());
 });
+export const getCrmContact = createServerFn({ method: "GET" })
+  .inputValidator((input: unknown) => z.object({ id }).strict().parse(input))
+  .handler(async ({ data }) => (await import("./crm.server")).getCrmContactDetail(await actor(), data.id));
+export const getCrmOpportunity = createServerFn({ method: "GET" })
+  .inputValidator((input: unknown) => z.object({ id }).strict().parse(input))
+  .handler(async ({ data }) => (await import("./crm.server")).requireCrmOpportunity(await actor(), data.id));
+export const getCrmContactsPage = createServerFn({ method: "GET" })
+  .inputValidator((input: unknown) => z.object({ search: z.string().trim().max(200).optional(), searchMode: z.enum(["contacts", "all"]).optional(), before: z.string().max(512).optional(), limit: z.number().int().min(1).max(100).optional(), ownerId: id.optional(), unitId: id.optional(), attentionOnly: z.boolean().optional() }).strict().parse(input))
+  .handler(async ({ data }) => (await import("./crm.server")).listCrmContactsPage(await actor(), data));
+export const getCrmTasksPage = createServerFn({ method: "GET" })
+  .inputValidator((input: unknown) => z.object({ opportunityId: id.optional(), status: z.enum(["pending", "done"]).optional(), after: z.string().max(512).optional(), limit: z.number().int().min(1).max(100).optional() }).strict().parse(input))
+  .handler(async ({ data }) => (await import("./crm.server")).listCrmTasksPage(await actor(), data));
 export const getCrmConversationPage = createServerFn({ method: "GET" })
   .inputValidator((input: unknown) =>
     z
@@ -164,12 +176,15 @@ export const importSiteLead = createServerFn({ method: "POST" })
   });
 export const linkQuote = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) =>
-    z.object({ opportunityId: id, quoteId: id }).strict().parse(input),
+    z.object({ opportunityId: id, quoteId: id, confirmMismatch: z.boolean().optional(), justification: z.string().trim().max(1000).optional(), confirmationToken: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict().parse(input),
   )
   .handler(async ({ data }) => {
     const { linkQuote: run } = await import("./crm.server");
     return run(await actor(), data);
   });
+export const previewCrmQuoteLink = createServerFn({ method: "GET" })
+  .inputValidator((input: unknown) => z.object({ opportunityId: id, quoteId: id }).strict().parse(input))
+  .handler(async ({ data }) => (await import("./crm.server")).previewCrmQuoteLink(await actor(), data));
 export const createQuoteForOpportunity = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => z.object({ opportunityId: id }).strict().parse(input))
   .handler(async ({ data }) => {

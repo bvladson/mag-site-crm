@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { Loader2, Pause, Play, Plug, QrCode, RefreshCw, Smartphone, Unlink, X } from "lucide-react";
@@ -11,7 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { controlWahaSession } from "@/lib/crm-waha.functions";
+import { controlWahaSession, retryWahaRecovery } from "@/lib/crm-waha.functions";
 import { useCrm } from "./CrmProvider";
 
 /** How long the screen keeps renewing the QR Code after Conectar (WhatsApp gives ~2.5 min). */
@@ -42,12 +42,15 @@ export const stateLabel: Record<string, string> = {
 const BLOCKED = ["unconfigured", "line_required", "owner_required", "phone_required"];
 /** Catch-up after a reconnection, as reported by the CRM (counts only). */
 export type WahaRecovery = {
-  state: "pending" | "done";
+  state: "pending" | "done" | "partial" | "error";
   processed: number;
   newChats: number;
   includesNewChats: boolean;
   nextAt: string | null;
   updatedAt: string;
+  errorCode: string | null;
+  hasMore: boolean;
+  failedCount: number;
 } | null;
 const clock = (value: string) =>
   new Intl.DateTimeFormat("pt-BR", { timeStyle: "short", timeZone: "America/Fortaleza" }).format(
@@ -55,6 +58,10 @@ const clock = (value: string) =>
   );
 function recoveryText(recovery: NonNullable<WahaRecovery>) {
   const found = `${recovery.processed} mensagem(ns) recuperada(s)${recovery.includesNewChats ? `, ${recovery.newChats} conversa(s) nova(s)` : ""}`;
+  if (recovery.state === "partial")
+    return `Conferência parcial das mensagens da desconexão: ${found}. Ainda há conversas ou páginas para conferir${recovery.failedCount ? ` e ${recovery.failedCount} pendência(s) com falha` : ""}.`;
+  if (recovery.state === "error")
+    return `A conferência das mensagens da desconexão não foi concluída. Até agora: ${found}. Verifique a conexão e tente continuar.`;
   return recovery.state === "pending"
     ? `Conferência das mensagens recebidas durante a desconexão em andamento${recovery.nextAt ? ` (próxima etapa às ${clock(recovery.nextAt)})` : ""}. Até agora: ${found}.`
     : `Conferência das mensagens recebidas durante a desconexão concluída às ${clock(recovery.updatedAt)}: ${found}.`;
@@ -76,8 +83,8 @@ export function WahaLinePanel({
   /** Omitted: the signed-in seller's own line. */
   lineId?: string;
   /** Last known state of the line (from the CRM connection). */
-  state?: string;
-  message?: string;
+  state?: string | undefined;
+  message?: string | undefined;
   phoneHint?: string | null;
   recovery?: WahaRecovery | undefined;
   /** Administrators may reapply the receiving configuration. */
@@ -85,7 +92,11 @@ export function WahaLinePanel({
 }) {
   const client = useQueryClient();
   const control = useServerFn(controlWahaSession);
+  const retryRecovery = useServerFn(retryWahaRecovery);
   const [busy, setBusy] = useState(false);
+  const controlling = useRef(false);
+  const generation = useRef(0);
+  const [recovering, setRecovering] = useState(false);
   const [qr, setQr] = useState<string | null>(null);
   const [qrAt, setQrAt] = useState<Date | null>(null);
   // While set, the screen renews the QR Code by itself until it is read, expires or the window ends.
@@ -113,6 +124,7 @@ export function WahaLinePanel({
   }, [state]);
   useEffect(() => {
     if (pairingUntil === null) return;
+    const currentGeneration = generation.current;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const stop = (next: string, text: string) => {
@@ -123,15 +135,18 @@ export function WahaLinePanel({
       void refresh();
     };
     const tick = async () => {
-      if (stopped) return;
+      if (stopped || generation.current !== currentGeneration) return;
       if (Date.now() > pairingUntil) {
-        stop("FAILED", "O tempo para ler o QR Code terminou. Use Conectar para gerar um novo código.");
+        stop(
+          "FAILED",
+          "O tempo para ler o QR Code terminou. Use Conectar para gerar um novo código.",
+        );
         return;
       }
       let wait = 2_000;
       try {
-        const result = (await control(request("qr"))) as Record<string, any>;
-        if (stopped) return;
+        const result = (await control(request("qr"))) as Record<string, unknown>;
+        if (stopped || generation.current !== currentGeneration) return;
         if (validQr(result["qrCode"])) {
           setQr(result["qrCode"]);
           setQrAt(new Date());
@@ -153,7 +168,7 @@ export function WahaLinePanel({
           wait = Math.max(1_000, Number(result["retryAfterMs"]) || 2_000);
         }
       } catch (error) {
-        if (stopped) return;
+        if (stopped || generation.current !== currentGeneration) return;
         setFailure(errorMessage(error));
         setQr(null);
         setPairingUntil(null);
@@ -173,6 +188,13 @@ export function WahaLinePanel({
   const paused = current === "PAUSED";
   const pairing = ["SCAN_QR_CODE", "STARTING", "FAILED", "number_mismatch"].includes(current);
   const run = async (name: Exclude<Action, "qr">) => {
+    if (controlling.current) return;
+    controlling.current = true;
+    if (["start", "restart", "pause", "logout"].includes(name)) {
+      generation.current++;
+      setQr(null);
+      setPairingUntil(null);
+    }
     setBusy(true);
     setFailure(null);
     setConfirm(null);
@@ -193,6 +215,7 @@ export function WahaLinePanel({
       setFailure(text);
       toast.error(text);
     } finally {
+      controlling.current = false;
       setBusy(false);
     }
   };
@@ -220,14 +243,60 @@ export function WahaLinePanel({
         <p className="text-sm text-muted-foreground">{status?.message || message}</p>
       )}
       {failure && (
-        <p role="alert" className="rounded-md border border-destructive/30 p-3 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/30 p-3 text-sm text-destructive"
+        >
           {failure}
         </p>
       )}
-      {recovery && (recovery.includesNewChats || recovery.processed > 0) && (
-        <p className="text-xs text-muted-foreground" data-crm-recovery={recovery.state}>
-          {recoveryText(recovery)}
-        </p>
+      {recovery && (
+        <div className="space-y-2 rounded-md border p-3 text-xs" data-crm-recovery={recovery.state}>
+          <p className={recovery.state === "error" ? "text-destructive" : "text-muted-foreground"}>
+            {recoveryText(recovery)}
+          </p>
+          {(recovery.state === "partial" ||
+            recovery.state === "error" ||
+            recovery.hasMore ||
+            recovery.failedCount > 0) && (
+            <>
+              {!connected && (
+                <p className="text-muted-foreground">
+                  Retome a conexão para continuar a conferência.
+                </p>
+              )}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={busy || recovering || !connected}
+                onClick={async () => {
+                  if (recovering) return;
+                  setRecovering(true);
+                  setFailure(null);
+                  try {
+                    await retryRecovery({ data: lineId ? { lineId } : {} });
+                    await refresh();
+                    toast.success("Conferência agendada para continuar");
+                  } catch (error) {
+                    setFailure(errorMessage(error));
+                  } finally {
+                    setRecovering(false);
+                  }
+                }}
+              >
+                {recovering ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3.5" />
+                )}
+                {recovery.state === "error"
+                  ? "Tentar conferência novamente"
+                  : "Continuar conferência"}
+              </Button>
+            </>
+          )}
+        </div>
       )}
       {(connected || paused) && (
         <p className="text-xs text-muted-foreground">
@@ -257,41 +326,73 @@ export function WahaLinePanel({
           </Button>
         )}
         {connected && (
-          <Button type="button" variant="outline" disabled={busy} onClick={() => setConfirm("pause")}>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={busy}
+            onClick={() => setConfirm("pause")}
+          >
             <Pause className="size-4" />
             Pausar
           </Button>
         )}
         {(connected || paused) && (
-          <Button type="button" variant="outline" disabled={busy} onClick={() => setConfirm("unlink")}>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={busy}
+            onClick={() => setConfirm("unlink")}
+          >
             <Unlink className="size-4" />
             Desvincular aparelho
           </Button>
         )}
         {pairing && (
-          <Button type="button" variant="outline" disabled={busy} onClick={() => void run("logout")}>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={busy}
+            onClick={() => void run("logout")}
+          >
             <X className="size-4" />
             Cancelar conexão
           </Button>
         )}
-        <Button type="button" variant="ghost" disabled={busy || blocked} onClick={() => void run("status")}>
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={busy || blocked}
+          onClick={() => void run("status")}
+        >
           <RefreshCw className="size-4" />
           Consultar status
         </Button>
         {canConfigure && (
-          <Button type="button" variant="ghost" disabled={busy || blocked} onClick={() => void run("configure")}>
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={busy || blocked}
+            onClick={() => void run("configure")}
+          >
             <Plug className="size-4" />
             Configurar recebimento
           </Button>
         )}
       </div>
       {confirm === "pause" && (
-        <div role="alertdialog" aria-label="Confirmar pausa" className="space-y-2 rounded-md border p-3 text-sm">
+        <div
+          role="alertdialog"
+          aria-label="Confirmar pausa"
+          className="space-y-2 rounded-md border p-3 text-sm"
+        >
           <p className="font-medium">Pausar o WhatsApp no CRM?</p>
           <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
             <li>O celular continua vinculado e nada é apagado.</li>
             <li>Enquanto estiver pausado, as mensagens não aparecem no CRM.</li>
-            <li>Para voltar, use Retomar, sem QR Code. O que chegou no intervalo entra no CRM.</li>
+            <li>
+              Para voltar, use Retomar, sem QR Code. O CRM confere as mensagens do intervalo
+              disponibilizadas pelo WhatsApp.
+            </li>
           </ul>
           <div className="flex gap-2">
             <Button type="button" size="sm" disabled={busy} onClick={() => void run("pause")}>
@@ -304,19 +405,29 @@ export function WahaLinePanel({
         </div>
       )}
       {confirm === "unlink" && (
-        <div role="alertdialog" aria-label="Confirmar desvinculação" className="space-y-2 rounded-md border p-3 text-sm">
+        <div
+          role="alertdialog"
+          aria-label="Confirmar desvinculação"
+          className="space-y-2 rounded-md border p-3 text-sm"
+        >
           <p className="font-medium">Desvincular este celular do CRM?</p>
           <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
             <li>O CRM sai da lista de Aparelhos conectados do seu WhatsApp.</li>
             <li>Para voltar, será preciso ler um novo QR Code.</li>
             <li>As conversas já guardadas continuam no CRM.</li>
             <li>
-              O que chegar enquanto estiver desvinculado é buscado depois do novo pareamento, conforme
-              o histórico que o WhatsApp enviar.
+              O que chegar enquanto estiver desvinculado é buscado depois do novo pareamento,
+              conforme o histórico que o WhatsApp enviar.
             </li>
           </ul>
           <div className="flex gap-2">
-            <Button type="button" size="sm" variant="destructive" disabled={busy} onClick={() => void run("logout")}>
+            <Button
+              type="button"
+              size="sm"
+              variant="destructive"
+              disabled={busy}
+              onClick={() => void run("logout")}
+            >
               Desvincular agora
             </Button>
             <Button type="button" size="sm" variant="ghost" onClick={() => setConfirm(null)}>
@@ -351,6 +462,7 @@ export function WahaLinePanel({
             type="button"
             variant="ghost"
             onClick={() => {
+              generation.current++;
               setQr(null);
               setPairingUntil(null);
             }}
@@ -387,7 +499,8 @@ export function MyWhatsAppButton() {
             <DialogDescription>
               Conecte o seu número ao CRM lendo o QR Code no celular e mantenha conectado durante o
               expediente: as mensagens entram no CRM na hora. Se precisar, pause (volta sem QR Code)
-              ou desvincule o aparelho (volta com um novo QR Code). As conversas continuam guardadas.
+              ou desvincule o aparelho (volta com um novo QR Code). As conversas continuam
+              guardadas.
             </DialogDescription>
           </DialogHeader>
           <WahaLinePanel

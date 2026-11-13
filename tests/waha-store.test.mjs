@@ -83,6 +83,19 @@ test("multiple open opportunities are retained for selection instead of updating
   assert.equal(core.requireCrmOpportunity(seller, a.id).awaitingReply, false); assert.equal(core.requireCrmOpportunity(seller, b.id).awaitingReply, true);
 });
 
+test("equal provider timestamps use ingestion order when an incoming message first opens the opportunity", () => {
+  const at="2026-01-01T10:00:00.000Z", phone="5585999000081";
+  const reply=incoming("tie-reply",phone,{from:"vendedora",at});
+  assert.equal(reply.opportunityId,null);
+  const received=incoming("tie-incoming",phone,{at});
+  assert.equal(core.requireCrmOpportunity(seller,received.opportunityId).awaitingReply,true);
+  assert.equal(core.requireCrmOpportunity(seller,received.opportunityId).lastInteraction,at);
+  const next=incoming("tie-reply-next",phone,{from:"vendedora",at});
+  assert.equal(core.requireCrmOpportunity(seller,next.opportunityId).awaitingReply,false);
+  incoming("tie-incoming",phone,{at});
+  assert.equal(core.requireCrmOpportunity(seller,next.opportunityId).awaitingReply,false,"replaying an equal-time message never reorders the conversation");
+});
+
 test("closed opportunities remain intact while a new incoming attendance opens one new cycle", () => {
   const current = core.requireCrmOpportunity(seller, first.opportunityId);
   core.moveOpportunity(seller, { id: current.id, revision: current.revision, stage: "fechado" });

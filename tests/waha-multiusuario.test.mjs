@@ -286,6 +286,8 @@ const readAt = (externalId) =>
   db.getDb().prepare("SELECT read_at FROM crm_messages WHERE external_id=?").get(externalId)?.read_at;
 
 test("unlinking keeps every conversation; the reconnection brings what arrived meanwhile, existing and new conversations, once", async () => {
+  // The line had been in service before this gap; overlap must never precede its first baseline.
+  db.getDb().prepare("UPDATE crm_waha_watermarks SET baseline=? WHERE session=?").run(now() - 86400, legacySession);
   const stored = count("crm_messages", "account=?", legacySession);
   const before = calls.length,
     startedAt = Date.now();
@@ -468,14 +470,13 @@ test("the first connection of a new number never imports the conversations alrea
   await waha.controlWahaSession(bia, { action: "start" });
   pair(line.session, "5585995550005");
   await deliver("session.status", line.session, { status: "WORKING" }, { id: "5585995550005@c.us" });
-  assert.equal(recoveryRow(line.session).state, "pending");
-  assert.equal(recoveryRow(line.session).window_start, null, "no known gap: only existing conversations would be completed");
+  assert.equal(recoveryRow(line.session), undefined, "first connection establishes a baseline without scheduling history");
   await runCatchUp(line.session);
   await runCatchUp(line.session);
-  assert.equal(recoveryRow(line.session).state, "done");
+  assert.equal(recoveryRow(line.session), undefined);
   assert.equal(count("crm_messages"), messages);
   assert.equal(count("crm_contacts"), contacts);
-  assert.equal((await waha.readWahaConnection(bia)).recovery?.includesNewChats, false);
+  assert.equal((await waha.readWahaConnection(bia)).recovery, null);
 });
 
 test("offboarding disconnects and disables the line; the portfolio stays visible to the administrator", async () => {
@@ -498,7 +499,7 @@ test("offboarding disconnects and disables the line; the portfolio stays visible
   await waha.setWahaLineStatus(admin, { id: line.id, revision: disabled.revision, status: "active" });
   assert.equal(lineOf(bia).session, line.session, "reactivation keeps the session and its history");
   assert.deepEqual(
-    [recoveryRow(line.session).offline_since, recoveryRow(line.session).window_start],
+    [recoveryRow(line.session)?.offline_since ?? null, recoveryRow(line.session)?.window_start ?? null],
     [null, null],
     "a disabled period is not a pause: nothing from it is imported on reactivation",
   );

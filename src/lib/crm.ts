@@ -95,6 +95,36 @@ export interface Conversation {
   messages: Message[];
   channel: string;
 }
+export interface CrmContactsPage {
+  contacts: Contact[];
+  conversations: Conversation[];
+  total: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+  matches?: Record<string, CrmContactSearchMatch>;
+  /** Older databases are indexed in bounded batches; never imply complete results before ready. */
+  searchIndex?: { ready: boolean };
+}
+export interface CrmContactSearchMatch {
+  kind: "name" | "phone" | "email" | "company" | "conversation" | "opportunity" | "other";
+  snippet?: string;
+}
+export interface CrmContactDetail {
+  contact: Contact;
+  opportunities: Opportunity[];
+  opportunitiesTruncated: boolean;
+  conversation: Conversation;
+}
+export interface CrmQuoteLinkPreview {
+  opportunityId: string;
+  quoteId: string;
+  alreadyLinked: boolean;
+  requiresConfirmation: boolean;
+  reasons: string[];
+  contact: { name: string; company: string; phone: string; email: string };
+  quote: { number: string; customerName: string; customerEmail: string; customerPhone: string };
+  confirmationToken: string;
+}
 export interface Proposal {
   id: string;
   number: string;
@@ -123,6 +153,12 @@ export interface CrmTask {
   status: "pending" | "done";
   createdAt: string;
   completedAt: string | null;
+}
+export interface CrmTasksPage {
+  tasks: CrmTask[];
+  total: number;
+  hasMore: boolean;
+  nextCursor: string | null;
 }
 export interface CrmActivity {
   id: string;
@@ -160,7 +196,7 @@ export interface CrmBootstrap {
   now: string;
   siteLeads: SiteLead[];
   limits: { records: number; truncated: boolean };
-  counts: { contacts: number; opportunities: number; unread: number; tasksPending: number };
+  counts: { contacts: number; opportunities: number; unread: number; tasksPending: number; awaitingContacts?: number };
 }
 export interface CrmContactInput {
   name: string;

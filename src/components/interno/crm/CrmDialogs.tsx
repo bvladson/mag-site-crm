@@ -13,6 +13,7 @@ import {
   Plus,
   Save,
   Pencil,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -40,7 +41,7 @@ import {
   type LossReason,
   type Origin,
 } from "@/lib/crm";
-import { getOpportunityDetail } from "@/lib/crm.functions";
+import { getOpportunityDetail, previewCrmQuoteLink } from "@/lib/crm.functions";
 import { cn } from "@/lib/utils";
 import { proposalsFor, useCrm } from "./CrmProvider";
 import { NextActionLine, OriginBadge, ProposalBadge, StageBadge } from "./bits";
@@ -89,6 +90,57 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 export function CrmDialogs() {
+  const { dialog, close, opportunity, contact, entityLoading, entityError, refresh } = useCrm();
+  const opportunityId =
+    dialog &&
+    ["opportunity", "schedule", "loss", "close", "createProposal"].includes(dialog.kind) &&
+    "id" in dialog
+      ? dialog.id
+      : undefined;
+  const current = opportunityId ? opportunity(opportunityId) : undefined;
+  const contactId =
+    dialog?.kind === "contact"
+      ? dialog.id
+      : dialog?.kind === "newOpportunity"
+        ? dialog.contactId
+        : current?.contactId;
+  const missingEntity = Boolean((opportunityId && !current) || (contactId && !contact(contactId)));
+  if (missingEntity)
+    return (
+      <Dialog
+        open
+        onOpenChange={(value) => {
+          if (!value) close();
+        }}
+      >
+        <DialogContent className="mag-crm mag-crm-dialog">
+          <DialogHeader>
+            <DialogTitle>
+              {entityLoading ? "Carregando cadastro" : "Cadastro indisponível"}
+            </DialogTitle>
+            <DialogDescription>
+              {entityLoading
+                ? "Buscando os dados deste registro."
+                : entityError
+                  ? "Não foi possível buscar este registro. Tente novamente."
+                  : "O cadastro não existe ou está fora do seu acesso."}
+            </DialogDescription>
+          </DialogHeader>
+          {entityLoading ? (
+            <Loader2 aria-label="Carregando" className="size-5 animate-spin" />
+          ) : (
+            <Button variant="outline" onClick={() => void refresh()}>
+              Tentar novamente
+            </Button>
+          )}
+          <DialogFooter>
+            <Button variant="ghost" onClick={close}>
+              Fechar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
   return (
     <>
       <OpportunityDrawer />
@@ -212,7 +264,9 @@ function OpportunityDrawer() {
                       interest: interest.trim(),
                       estimatedValueCents: Math.round(amount * 100),
                     });
-                  } catch {}
+                  } catch {
+                    // O CRM apresenta a falha da ação e mantém o formulário aberto.
+                  }
                 }}
               >
                 <div className="space-y-1.5">
@@ -266,7 +320,9 @@ function OpportunityDrawer() {
                   try {
                     await saveOpportunity(current.id, { notes });
                     setNotes(notes.trim());
-                  } catch {}
+                  } catch {
+                    // O CRM apresenta a falha da ação e mantém o formulário aberto.
+                  }
                 }}
               >
                 <Label htmlFor="crm-op-notes">Notas internas</Label>
@@ -465,7 +521,9 @@ function ScheduleDialog() {
             try {
               await schedule(current.id, label.trim(), toIsoDateTime(due));
               close();
-            } catch {}
+            } catch {
+              // O CRM apresenta a falha da ação e mantém o formulário aberto.
+            }
           }}
         >
           <div className="flex flex-wrap gap-2">
@@ -567,7 +625,9 @@ function LossDialog() {
               try {
                 await applyStage(current.id, "perdido", reason);
                 close();
-              } catch {}
+              } catch {
+                // O CRM apresenta a falha da ação e mantém o formulário aberto.
+              }
             }}
           >
             Registrar “Não fechou”
@@ -610,7 +670,9 @@ function CloseDialog() {
               try {
                 await applyStage(current.id, "fechado");
                 close();
-              } catch {}
+              } catch {
+                // O CRM apresenta a falha da ação e mantém o formulário aberto.
+              }
             }}
           >
             Sim, negociação fechada
@@ -691,7 +753,9 @@ function NewOpportunityDialog() {
               });
               close();
               open({ kind: "opportunity", id });
-            } catch {}
+            } catch {
+              // O CRM apresenta a falha da ação e mantém o formulário aberto.
+            }
           }}
         >
           {!preset && (
@@ -901,7 +965,9 @@ function ContactDialog() {
             try {
               await saveContact(input, current);
               close();
-            } catch {}
+            } catch {
+              // O CRM apresenta a falha da ação e mantém o formulário aberto.
+            }
           }}
         >
           <div className="space-y-1.5">
@@ -1018,11 +1084,26 @@ function ContactDialog() {
 }
 
 function CreateProposalDialog() {
-  const { dialog, close, opportunity, proposals, attachQuote, createQuote, busy } = useCrm();
+  const { dialog, close, opportunity, proposals, attachQuote, createQuote, busy, viewerId } =
+    useCrm();
   const current = dialog?.kind === "createProposal" ? opportunity(dialog.id) : undefined;
   const navigate = useNavigate();
   const [quoteId, setQuoteId] = useState("");
+  const [confirmMismatch, setConfirmMismatch] = useState(false);
+  const [justification, setJustification] = useState("");
+  const previewLink = useServerFn(previewCrmQuoteLink);
+  const preview = useQuery({
+    queryKey: ["interno", "crm", "quote-link-preview", viewerId, current?.id, quoteId],
+    queryFn: () => previewLink({ data: { opportunityId: current!.id, quoteId } }),
+    enabled: Boolean(current && quoteId),
+    retry: 1,
+    staleTime: 0,
+  });
   useEffect(() => setQuoteId(""), [current?.id]);
+  useEffect(() => {
+    setConfirmMismatch(false);
+    setJustification("");
+  }, [current?.id, quoteId]);
   const available = proposals.filter((item) => !item.opportunityId);
   return (
     <Dialog
@@ -1050,7 +1131,9 @@ function CreateProposalDialog() {
                 const saved = await createQuote(current.id);
                 close();
                 void navigate({ to: "/interno/orcamentos-internos/$id", params: { id: saved.id } });
-              } catch {}
+              } catch {
+                // O CRM apresenta a falha da ação e mantém o formulário aberto.
+              }
             }}
           >
             <Plus />
@@ -1077,15 +1160,91 @@ function CreateProposalDialog() {
             <p className="text-xs text-muted-foreground">
               O responsável da negociação deve ser o mesmo da oportunidade.
             </p>
+            {quoteId && preview.isLoading && (
+              <p className="text-xs text-muted-foreground">Conferindo o cliente da negociação…</p>
+            )}
+            {quoteId && preview.isError && (
+              <p role="alert" className="text-xs text-destructive">
+                Não foi possível conferir o vínculo.{" "}
+                <button type="button" className="underline" onClick={() => void preview.refetch()}>
+                  Tentar novamente
+                </button>
+              </p>
+            )}
+            {preview.data?.requiresConfirmation && (
+              <div
+                role="alert"
+                className="space-y-3 rounded-md border border-amber-500/40 bg-amber-50 p-3 text-sm text-amber-950"
+              >
+                <p className="font-semibold">Os dados dos clientes são diferentes</p>
+                <p>
+                  Oportunidade: {preview.data.contact.name}
+                  {preview.data.contact.company ? ` · ${preview.data.contact.company}` : ""}.
+                  Negociação {preview.data.quote.number}:{" "}
+                  {preview.data.quote.customerName || "cliente não informado"}.
+                </p>
+                <ul className="list-disc space-y-1 pl-4 text-xs">
+                  {preview.data.reasons.map((reason) => (
+                    <li key={reason}>{reason}</li>
+                  ))}
+                </ul>
+                <p className="text-xs">
+                  Vincular mantém a proposta e seu cliente como estão. Confirme somente se esta
+                  negociação pertence a este atendimento.
+                </p>
+                <label className="flex items-start gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={confirmMismatch}
+                    disabled={busy}
+                    onChange={(event) => setConfirmMismatch(event.target.checked)}
+                  />
+                  Conferi os clientes e confirmo este vínculo
+                </label>
+                <div className="space-y-1">
+                  <Label htmlFor="crm-link-justification">Motivo do vínculo</Label>
+                  <Textarea
+                    id="crm-link-justification"
+                    value={justification}
+                    disabled={busy}
+                    minLength={10}
+                    maxLength={1000}
+                    rows={2}
+                    placeholder="Explique o motivo (mínimo de 10 caracteres)"
+                    onChange={(event) => setJustification(event.target.value)}
+                  />
+                </div>
+              </div>
+            )}
             <Button
               variant="outline"
-              disabled={busy || !quoteId}
+              disabled={
+                busy ||
+                !quoteId ||
+                preview.isFetching ||
+                preview.isError ||
+                !preview.data ||
+                (preview.data.requiresConfirmation &&
+                  (!confirmMismatch || justification.trim().length < 10))
+              }
               onClick={async () => {
                 if (!current || !quoteId) return;
                 try {
-                  await attachQuote(current.id, quoteId);
+                  await attachQuote(
+                    current.id,
+                    quoteId,
+                    preview.data?.requiresConfirmation
+                      ? {
+                          confirmMismatch: true,
+                          justification: justification.trim(),
+                          confirmationToken: preview.data.confirmationToken,
+                        }
+                      : undefined,
+                  );
                   close();
-                } catch {}
+                } catch {
+                  // O CRM apresenta a falha da ação e mantém o formulário aberto.
+                }
               }}
             >
               Vincular negociação

@@ -1,10 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { getDb, audit } from "./local-db.server.ts";
 import { requireActiveUser, type SiteUser } from "./local-auth-core.server.ts";
 import { assignmentsSchema, leadAssignment, validateAssignedOwner } from "./assignments.server.ts";
 import { listUnitsPublic, validateUnitId } from "./units.server.ts";
 import { criarOrcamento, orcamentoDoUsuario } from "./orcamentos.server.ts";
-import { brPhoneVariants, normalizeBrPhone } from "./br-phone.ts";
+import { brPhoneVariants, normalizeBrPhone, samePhone } from "./br-phone.ts";
 import {
   STAGE_LABEL,
   ORIGINS,
@@ -23,6 +23,12 @@ import {
   type IngestCrmLeadInput,
   type RecordCrmMessageInput,
   type CrmAttachment,
+  type Conversation,
+  type CrmContactsPage,
+  type CrmContactDetail,
+  type CrmQuoteLinkPreview,
+  type CrmTasksPage,
+  type CrmContactSearchMatch,
 } from "./crm.ts";
 
 type Row = Record<string, any>;
@@ -44,6 +50,7 @@ const text = (value: unknown, max: number) =>
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
     .trim()
     .slice(0, max);
+const fold = (value: unknown) => str(value).normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 const phone = (value: unknown) => {
   const digits = str(value).replace(/\D/g, "");
   // Brazilian mobiles are stored with the 9th digit; existing rows are matched in both spellings.
@@ -79,6 +86,9 @@ export function ensureCrmSchema() {
   if (initialized.has(db)) return db;
   assignmentsSchema();
   listUnitsPublic();
+  db.function("crm_search_fold", { deterministic: true }, (value) => fold(value));
+  db.function("crm_contact_search_rank", { deterministic: true }, (name, company, phone, email, city, query) =>
+    registrationRank([name, company, phone, email, city].map(value => str(value)), str(query)));
   db.exec(`
     CREATE TABLE IF NOT EXISTS crm_contacts (
       id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), unit_id TEXT,
@@ -99,6 +109,7 @@ export function ensureCrmSchema() {
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_interaction TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS crm_opportunities_owner ON crm_opportunities(owner_id, updated_at);
+    CREATE INDEX IF NOT EXISTS crm_opportunities_contact ON crm_opportunities(contact_id, updated_at DESC, id DESC);
     CREATE TABLE IF NOT EXISTS crm_lead_links (
       provider TEXT NOT NULL, external_id TEXT NOT NULL, opportunity_id TEXT NOT NULL REFERENCES crm_opportunities(id),
       created_at TEXT NOT NULL, PRIMARY KEY(provider, external_id)
@@ -126,6 +137,8 @@ export function ensureCrmSchema() {
       sent_at TEXT NOT NULL, read_at TEXT, UNIQUE(provider,account,external_id)
     );
     CREATE INDEX IF NOT EXISTS crm_messages_contact ON crm_messages(contact_id, sent_at);
+    CREATE INDEX IF NOT EXISTS crm_messages_latest ON crm_messages(contact_id, sent_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS crm_messages_unread ON crm_messages(contact_id, sender, read_at);
     CREATE TABLE IF NOT EXISTS crm_message_receipts (
       provider TEXT NOT NULL, account TEXT NOT NULL, external_id TEXT NOT NULL, status TEXT NOT NULL,
       updated_at TEXT NOT NULL, PRIMARY KEY(provider,account,external_id)
@@ -170,6 +183,212 @@ export function requireCrmContact(actor: SiteUser, id: string): Contact {
   if (!row || (!isAdmin(actor) && row["owner_id"] !== actor.id))
     throw new Error("Forbidden: contato indisponível para sua carteira");
   return contactFromRow(row);
+}
+const contactActivity = `MAX(c.updated_at,
+  COALESCE((SELECT sent_at FROM crm_messages m WHERE m.contact_id=c.id ORDER BY sent_at DESC,id DESC LIMIT 1),c.updated_at),
+  COALESCE((SELECT updated_at FROM crm_opportunities o WHERE o.contact_id=c.id ORDER BY updated_at DESC,id DESC LIMIT 1),c.updated_at))`;
+const contactAttention = `(EXISTS(SELECT 1 FROM crm_messages m WHERE m.contact_id=c.id AND m.sender='cliente' AND m.read_at IS NULL)
+  OR EXISTS(SELECT 1 FROM crm_opportunities o WHERE o.contact_id=c.id AND o.awaiting_reply=1 AND o.stage NOT IN ('fechado','perdido')))`;
+function cursorHash(value: unknown) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
+function readListCursor(raw: string | undefined, scope: string, ranked = false) {
+  if (!raw) return null;
+  try {
+    if (raw.length > 512) throw new Error("cursor");
+    const value = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+    if (typeof value.at !== "string" || new Date(value.at).toISOString() !== value.at || !/^[0-9a-f-]{36}$/i.test(value.id) || value.scope !== scope || (ranked && (!Number.isInteger(value.rank) || value.rank < 0 || value.rank > 100))) throw new Error("cursor");
+    return { at: value.at as string, id: value.id as string, rank: ranked ? Number(value.rank) : 0 };
+  } catch { throw new Error("Cursor inválido para os filtros atuais"); }
+}
+function listLimit(value: number | undefined) {
+  const limit = value ?? 50;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Limite de registros inválido");
+  return limit;
+}
+function conversationSummaries(contactIds: string[]): Conversation[] {
+  if (!contactIds.length) return [];
+  const db = getDb(), marks = contactIds.map(() => "?").join(",");
+  const rows = db.prepare(`SELECT c.id,
+    (SELECT id FROM crm_messages m WHERE m.contact_id=c.id ORDER BY sent_at DESC,id DESC LIMIT 1) latest_id,
+    (SELECT count(*) FROM crm_messages m WHERE m.contact_id=c.id AND m.sender='cliente' AND m.read_at IS NULL) unread
+    FROM crm_contacts c WHERE c.id IN (${marks})`).all(...contactIds);
+  const latestIds = rows.map(row => str(row["latest_id"])).filter(Boolean);
+  const latest = latestIds.length ? db.prepare(`SELECT * FROM crm_messages WHERE id IN (${latestIds.map(() => "?").join(",")})`).all(...latestIds) : [];
+  // Previews never expand every contact's history or media. The authenticated history page loads attachments on demand.
+  const messages = new Map(latest.map(row => [str(row["id"]), messageFromRow(row, false)]));
+  const summaries = new Map(rows.map(row => {
+    const message = messages.get(str(row["latest_id"]));
+    const summary: Conversation = { id: str(row["id"]), contactId: str(row["id"]), unread: Number(row["unread"]), messages: message ? [message] : [], channel: message?.channel || "whatsapp" };
+    return [summary.contactId, summary];
+  }));
+  return contactIds.map(id => summaries.get(id)!);
+}
+const searchTokens = (value: string) => [...new Set(fold(value).trim().split(/\s+/).filter(Boolean))].slice(0, 12);
+const phoneDigits = (value: string) => value.replace(/\D/g, "");
+const isPhoneSearch = (value: string) => /^[+\d\s().-]+$/.test(value) && Boolean(phoneDigits(value));
+function phoneSearchMatch(stored: string, query: string) {
+  const saved = phoneDigits(stored), digits = phoneDigits(query);
+  if (!saved || !digits) return false;
+  if (saved.includes(digits)) return true;
+  if (digits.length < 10) return false;
+  return brPhoneVariants(phone(query)).some(candidate => brPhoneVariants(phone(stored)).includes(candidate));
+}
+/** A single insertion, deletion or substitution in a name word only; never fuzzy-match numbers. */
+function oneNameEdit(word: string, query: string) {
+  if (!/^[a-z]{4,32}$/.test(query) || !/^[a-z]{3,33}$/.test(word) || Math.abs(word.length - query.length) > 1) return false;
+  let left = 0, right = 0, errors = 0;
+  while (left < word.length && right < query.length) {
+    if (word[left] === query[right]) { left++; right++; continue; }
+    if (++errors > 1) return false;
+    if (word.length >= query.length) left++;
+    if (query.length >= word.length) right++;
+  }
+  return errors + Number(left < word.length || right < query.length) <= 1;
+}
+/** SQL function, with fresh rows already restricted by the portfolio predicates. */
+function registrationRank(fields: string[], query: string) {
+  const [name = "", company = "", number = "", email = "", city = ""] = fields.map(fold);
+  const normalized = fold(query).trim();
+  if (!normalized) return 0;
+  if (isPhoneSearch(normalized)) return phoneSearchMatch(number, normalized) ? (phone(number) === phone(normalized) ? 100 : 90) : 0;
+  if (normalized === name || normalized === email) return 100;
+  if (name.startsWith(normalized)) return 95;
+  if (normalized === company) return 92;
+  const tokens = searchTokens(normalized), searchable = [name, company, number, email, city];
+  const exact = (token: string) => searchable.some(value => value.includes(token)) || (/^\d{10,13}$/.test(token) && phoneSearchMatch(number, token));
+  if (tokens.every(exact)) return tokens.every(token => name.includes(token)) ? 85 : 80;
+  const words = name.split(/[^a-z]+/).filter(Boolean);
+  // One misspelled name word is tolerated only after every other term has matched literally.
+  const missed = tokens.filter(token => !exact(token));
+  return missed.length === 1 && words.some(word => oneNameEdit(word, missed[0]!)) ? 65 : 0;
+}
+function searchSnippet(value: string, query: string) {
+  const safe = value.replace(/(?:https?:\/\/|www\.)[^\s<>"']+/gi, "[link omitido]")
+    .replace(/\b(token|api[_-]?key|secret|password|senha|authorization)\b\s*[:=]\s*[^\s,;]+/gi, "$1=[oculto]")
+    .replace(/\b[a-f0-9]{32,}\b/gi, "[código omitido]")
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[credencial omitida]")
+    .replace(/\s+/g, " ").trim();
+  const normalized = fold(safe), positions = searchTokens(query).map(token => normalized.indexOf(token)).filter(index => index >= 0);
+  const start = Math.max(0, (positions.length ? Math.min(...positions) : 0) - 45);
+  return `${start ? "…" : ""}${safe.slice(start, start + 160)}${safe.length > start + 160 ? "…" : ""}`;
+}
+/** Search is local. The index never queries a connector, changes a message or includes media content. */
+function prepareMessageSearchIndex() {
+  const db = getDb();
+  // The first local candidate used crm_messages.rowid. Those UUID-keyed rows may be renumbered
+  // by VACUUM/restore, so discard only that derived index and rebuild against stable message IDs.
+  if (db.prepare("PRAGMA table_info(crm_message_search_state)").all().some(column => column["name"] === "last_rowid"))
+    db.exec(`DROP TRIGGER IF EXISTS crm_message_search_insert;
+      DROP TRIGGER IF EXISTS crm_message_search_update;
+      DROP TRIGGER IF EXISTS crm_message_search_delete;
+      DROP TABLE crm_message_search; DROP TABLE crm_message_search_state;`);
+  db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS crm_message_search USING fts5(text, tokenize='unicode61 remove_diacritics 2', prefix='2 3 4');
+    CREATE TABLE IF NOT EXISTS crm_message_search_documents(id INTEGER PRIMARY KEY,message_id TEXT NOT NULL UNIQUE REFERENCES crm_messages(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS crm_message_search_state(id INTEGER PRIMARY KEY CHECK(id=1),last_id TEXT NOT NULL DEFAULT '',ready INTEGER NOT NULL DEFAULT 0);
+    INSERT OR IGNORE INTO crm_message_search_state(id) VALUES(1);
+    CREATE TRIGGER IF NOT EXISTS crm_message_search_insert AFTER INSERT ON crm_messages BEGIN
+      INSERT OR IGNORE INTO crm_message_search_documents(message_id) VALUES(new.id);
+      INSERT OR REPLACE INTO crm_message_search(rowid,text) SELECT id,new.text FROM crm_message_search_documents WHERE message_id=new.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS crm_message_search_update AFTER UPDATE OF text ON crm_messages BEGIN
+      INSERT OR IGNORE INTO crm_message_search_documents(message_id) VALUES(new.id);
+      INSERT OR REPLACE INTO crm_message_search(rowid,text) SELECT id,new.text FROM crm_message_search_documents WHERE message_id=new.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS crm_message_search_delete AFTER DELETE ON crm_message_search_documents BEGIN
+      DELETE FROM crm_message_search WHERE rowid=old.rowid;
+    END;`);
+  const state = db.prepare("SELECT last_id,ready FROM crm_message_search_state WHERE id=1").get()!;
+  if (state["ready"]) return { ready: true };
+  const end = Date.now() + 75, document = db.prepare("INSERT OR IGNORE INTO crm_message_search_documents(message_id) VALUES(?)"), insert = db.prepare("INSERT OR REPLACE INTO crm_message_search(rowid,text) SELECT id,? FROM crm_message_search_documents WHERE message_id=?");
+  // A large existing database is backfilled incrementally instead of blocking a deploy/GET.
+  return atomic(() => {
+    let indexed = 0, lastId = str(state["last_id"]);
+    do {
+      const rows = db.prepare("SELECT id,text FROM crm_messages WHERE id>? ORDER BY id LIMIT 100").all(lastId);
+      if (!rows.length) { db.prepare("UPDATE crm_message_search_state SET ready=1 WHERE id=1").run(); return { ready: true }; }
+      for (const row of rows) { document.run(str(row["id"])); insert.run(str(row["text"]), str(row["id"])); }
+      lastId = str(rows.at(-1)!["id"]);
+      db.prepare("UPDATE crm_message_search_state SET last_id=? WHERE id=1").run(lastId);
+      indexed += rows.length;
+    } while (Date.now() < end && indexed < 1000);
+    return { ready: false };
+  });
+}
+function registrationMatch(row: Row, query: string, rank: number): CrmContactSearchMatch {
+  const tokens = searchTokens(query), fields = ["name", "company", "email", "phone"] as const;
+  if (isPhoneSearch(query)) return { kind: "phone" };
+  if (rank === 65) return { kind: "name", snippet: `Nome semelhante: ${searchSnippet(str(row["name"]), query)}` };
+  for (const field of fields) if (tokens.every(token => fold(row[field]).includes(token))) return { kind: field };
+  return { kind: "other" };
+}
+export interface CrmContactsPageInput { search?: string | undefined; searchMode?: "contacts" | "all" | undefined; before?: string | undefined; limit?: number | undefined; ownerId?: string | undefined; unitId?: string | undefined; attentionOnly?: boolean | undefined; }
+export function listCrmContactsPage(actor: SiteUser, input: CrmContactsPageInput = {}): CrmContactsPage {
+  actor = guard(actor);
+  const db = ensureCrmSchema(), limit = listLimit(input.limit), search = text(input.search, 200);
+  const searchMode = input.searchMode ?? "contacts";
+  if (!["contacts", "all"].includes(searchMode)) throw new Error("Modo de busca inválido");
+  if (!isAdmin(actor) && input.ownerId && input.ownerId !== actor.id) throw new Error("Forbidden: filtro de outra carteira");
+  const ownerId = isAdmin(actor) ? input.ownerId || "" : actor.id;
+  const conditions: string[] = [], args: Record<string, string | number> = {};
+  if (ownerId) { conditions.push("c.owner_id=$owner"); args["owner"] = ownerId; }
+  if (input.unitId) { conditions.push("c.unit_id=$unit"); args["unit"] = input.unitId; }
+  if (input.attentionOnly) conditions.push(contactAttention);
+  const rankExpression = "crm_contact_search_rank(c.name,c.company,c.phone,c.email,c.city,$query)";
+  let ranked = "0", searchIndex: { ready: boolean } | undefined;
+  const tokens = searchTokens(search);
+  if (search) {
+    args["query"] = search;
+    ranked = rankExpression;
+    if (searchMode === "all") searchIndex = prepareMessageSearchIndex();
+    const allTerms = tokens.map((token, index) => {
+        args[`term${index}`] = token;
+        args[`like${index}`] = `%${token.replace(/[\\%_]/g, "\\$&")}%`;
+        if (searchMode === "all") {
+          const words = token.match(/[\p{L}\p{N}]+/gu) ?? [];
+          args[`fts${index}`] = words.map(word => `"${word.replace(/"/g, '""')}"*`).join(" AND ") || '"__empty_query__"';
+        }
+        return `(crm_contact_search_rank(c.name,c.company,c.phone,c.email,c.city,$term${index})>0
+          OR EXISTS(SELECT 1 FROM crm_opportunities o WHERE o.contact_id=c.id AND o.owner_id=c.owner_id AND crm_search_fold(o.title||' '||o.interest||' '||o.notes) LIKE $like${index} ESCAPE '\\')
+          ${searchMode === "all" ? `OR EXISTS(SELECT 1 FROM crm_messages m WHERE m.contact_id=c.id AND m.id IN (SELECT message_id FROM crm_message_search_documents WHERE id IN (SELECT rowid FROM crm_message_search WHERE crm_message_search MATCH $fts${index})))` : ""})`;
+      });
+    ranked = `CASE WHEN ${rankExpression}>0 THEN ${rankExpression} WHEN ${allTerms.join(" AND ")} THEN 40 ELSE 0 END`;
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const scope = cursorHash({ version: 2, actor: actor.id, ownerId, unitId: input.unitId || "", search: fold(search), searchMode, attentionOnly: Boolean(input.attentionOnly) });
+  const cursor = readListCursor(input.before, scope, Boolean(search));
+  const baseQuery = `SELECT c.*,${contactActivity} activity_at,${ranked} search_rank FROM crm_contacts c ${where}`;
+  const filters = [search ? "search_rank>0" : "1"];
+  if (cursor) {
+    args["before"] = cursor.at; args["beforeId"] = cursor.id;
+    if (search) { args["beforeRank"] = cursor.rank; filters.push("(search_rank<$beforeRank OR (search_rank=$beforeRank AND (activity_at<$before OR (activity_at=$before AND id<$beforeId))))"); }
+    else filters.push("(activity_at<$before OR (activity_at=$before AND id<$beforeId))");
+  }
+  const totalArgs = { ...args };
+  delete totalArgs["before"]; delete totalArgs["beforeId"]; delete totalArgs["beforeRank"];
+  args["limit"] = limit + 1;
+  const rows = db.prepare(`SELECT * FROM (${baseQuery}) WHERE ${filters.join(" AND ")} ORDER BY search_rank DESC,activity_at DESC,id DESC LIMIT $limit`).all(args) as Row[];
+  // An incomplete index must finish before issuing cursors over a changing subset of results.
+  const hasMore = rows.length > limit && searchIndex?.ready !== false, selected = rows.slice(0, limit), oldest = selected.at(-1);
+  const matches: Record<string, CrmContactSearchMatch> = {};
+  if (search) for (const row of selected) {
+    const rank = Number(row["search_rank"]);
+    if (rank > 40) { matches[str(row["id"])] = registrationMatch(row, search, rank); continue; }
+    const opportunity = db.prepare(`SELECT title,interest,notes FROM crm_opportunities WHERE contact_id=? AND owner_id=? AND (${tokens.map(() => "crm_search_fold(title||' '||interest||' '||notes) LIKE ? ESCAPE '\\'").join(" OR ")}) ORDER BY updated_at DESC,id DESC LIMIT 1`).get(str(row["id"]), str(row["owner_id"]), ...tokens.map(token => `%${token.replace(/[\\%_]/g, "\\$&")}%`));
+    const ftsTerms = Object.entries(totalArgs).filter(([key]) => key.startsWith("fts")).map(([, value]) => `(${value})`).join(" OR ");
+    const message = ftsTerms ? db.prepare("SELECT text FROM crm_messages WHERE contact_id=? AND id IN (SELECT message_id FROM crm_message_search_documents WHERE id IN (SELECT rowid FROM crm_message_search WHERE crm_message_search MATCH ?)) ORDER BY sent_at DESC,id DESC LIMIT 1").get(str(row["id"]), ftsTerms) : null;
+    matches[str(row["id"])] = message ? { kind: "conversation", snippet: searchSnippet(str(message["text"]), search) }
+      : opportunity ? { kind: "opportunity", snippet: searchSnippet(`${opportunity["title"]} · ${opportunity["interest"]} ${opportunity["notes"]}`, search) } : { kind: "other" };
+  }
+  const summaries = conversationSummaries(selected.map(row => str(row["id"])));
+  const conversations = search ? summaries.map(summary => ({ ...summary, messages: summary.messages.map(message => ({ ...message, text: searchSnippet(message.text, search) })) })) : summaries;
+  return { contacts: selected.map(contactFromRow), conversations, total: Number(db.prepare(`SELECT count(*) n FROM (${baseQuery}) ${search ? "WHERE search_rank>0" : ""}`).get(totalArgs)?.["n"]), hasMore,
+    nextCursor: hasMore && oldest ? Buffer.from(JSON.stringify({ at: oldest["activity_at"], id: oldest["id"], rank: oldest["search_rank"], scope })).toString("base64url") : null,
+    ...(search ? { matches } : {}), ...(searchIndex ? { searchIndex } : {}) };
+}
+export function getCrmContactDetail(actor: SiteUser, id: string): CrmContactDetail {
+  actor = guard(actor);
+  const contact = requireCrmContact(actor, id);
+  const rows = getDb().prepare(`SELECT * FROM crm_opportunities WHERE contact_id=? ${isAdmin(actor) ? "" : "AND owner_id=?"} ORDER BY updated_at DESC,id DESC LIMIT ?`).all(id, ...(isAdmin(actor) ? [] : [actor.id]), LIMIT + 1) as Row[];
+  return { contact, opportunities: rows.slice(0, LIMIT).map(opportunityFromRow), opportunitiesTruncated: rows.length > LIMIT, conversation: conversationSummaries([id])[0]! };
 }
 function opportunityFromRow(r: Row): Opportunity {
   const db = getDb();
@@ -482,6 +701,24 @@ function taskFromRow(r: Row): CrmTask {
     completedAt: r["completed_at"],
   };
 }
+export interface CrmTasksPageInput { opportunityId?: string | undefined; status?: "pending" | "done" | undefined; after?: string | undefined; limit?: number | undefined; }
+export function listCrmTasksPage(actor: SiteUser, input: CrmTasksPageInput = {}): CrmTasksPage {
+  actor = guard(actor);
+  const db = ensureCrmSchema(), limit = listLimit(input.limit), status = input.status || "pending";
+  if (!["pending", "done"].includes(status)) throw new Error("Estado de tarefa inválido");
+  if (input.opportunityId) requireCrmOpportunity(actor, input.opportunityId);
+  const conditions = ["t.status=?"], args: (string | number)[] = [status];
+  if (!isAdmin(actor)) { conditions.push("o.owner_id=?"); args.push(actor.id); }
+  if (input.opportunityId) { conditions.push("t.opportunity_id=?"); args.push(input.opportunityId); }
+  const scope = cursorHash({ actor: actor.id, status, opportunityId: input.opportunityId || "" });
+  const cursor = readListCursor(input.after, scope);
+  const where = conditions.join(" AND ");
+  const rows = db.prepare(`SELECT t.* FROM crm_tasks t JOIN crm_opportunities o ON o.id=t.opportunity_id WHERE ${where}
+    ${cursor ? "AND (t.due>? OR (t.due=? AND t.id>?))" : ""} ORDER BY t.due,t.id LIMIT ?`).all(...args, ...(cursor ? [cursor.at, cursor.at, cursor.id] : []), limit + 1) as Row[];
+  const hasMore = rows.length > limit, selected = rows.slice(0, limit), last = selected.at(-1);
+  return { tasks: selected.map(taskFromRow), total: Number(db.prepare(`SELECT count(*) n FROM crm_tasks t JOIN crm_opportunities o ON o.id=t.opportunity_id WHERE ${where}`).get(...args)?.["n"]), hasMore,
+    nextCursor: hasMore && last ? Buffer.from(JSON.stringify({ at: last["due"], id: last["id"], scope })).toString("base64url") : null };
+}
 export function scheduleTask(
   actor: SiteUser,
   input: { opportunityId: string; label: string; due: string },
@@ -634,7 +871,9 @@ export function importSiteLead(
       "lead:imported",
       `Solicitação ${row["protocolo"]} vinculada; origem preservada no registro original`,
     );
-    if (data["mensagem"])
+    if (data["mensagem"]) {
+      const latest = getDb().prepare("SELECT sent_at FROM crm_messages WHERE contact_id=? ORDER BY sent_at DESC,id DESC LIMIT 1").get(contact.id);
+      const olderThanConversation = Boolean(latest && str(row["created_at"]) < str(latest["sent_at"]));
       recordCrmMessage({
         contactId: contact.id,
         provider: "site",
@@ -645,7 +884,13 @@ export function importSiteLead(
         at: row["created_at"],
         channel: "site",
         status: "received",
+        historical: olderThanConversation,
+        suppressOpportunityUpdate: true,
       });
+      // Bringing a source into the CRM is explicit: its new opportunity may need follow-up,
+      // but it must never reset another negotiation of the same contact to "awaiting reply".
+      getDb().prepare("UPDATE crm_opportunities SET awaiting_reply=1,revision=revision+1,updated_at=? WHERE id=?").run(now(), op.id);
+    }
     const linked =
       input.sourceKind === "quote"
         ? (getDb()
@@ -661,7 +906,7 @@ export function importSiteLead(
   });
 }
 
-function allProposals(actor: SiteUser): Proposal[] {
+function allProposals(actor: SiteUser, opportunityId?: string): Proposal[] {
   const db = getDb();
   const rows = db
     .prepare(
@@ -669,9 +914,9 @@ function allProposals(actor: SiteUser): Proposal[] {
       json_extract(p.snapshot,'$.totais.totalCentavos') snapshot_total
     FROM internal_quotes q LEFT JOIN crm_quote_links l ON l.quote_id=q.id LEFT JOIN crm_opportunities o ON o.id=l.opportunity_id
     LEFT JOIN quote_proposals p ON p.quote_id=q.id AND p.current=1 AND p.deleted_at IS NULL
-    ${isAdmin(actor) ? "" : "WHERE q.owner_id=?"} ORDER BY q.updated_at DESC LIMIT ${LIMIT}`,
+    WHERE 1=1 ${isAdmin(actor) ? "" : "AND q.owner_id=?"} ${opportunityId ? "AND l.opportunity_id=?" : ""} ORDER BY q.updated_at DESC LIMIT ${LIMIT}`,
     )
-    .all(...(isAdmin(actor) ? [] : [actor.id])) as Row[];
+    .all(...(isAdmin(actor) ? [] : [actor.id]), ...(opportunityId ? [opportunityId] : [])) as Row[];
   return rows.map((r) => {
     const status =
       r["status"] === "cancelado"
@@ -700,25 +945,56 @@ function allProposals(actor: SiteUser): Proposal[] {
     };
   });
 }
-export function linkQuote(actor: SiteUser, input: { opportunityId: string; quoteId: string }) {
+const QUOTE_IDENTITY_UNVERIFIED = "Não há telefone, e-mail ou solicitação de origem comum suficiente para conferir o cliente.";
+export interface LinkCrmQuoteInput { opportunityId: string; quoteId: string; confirmMismatch?: boolean | undefined; justification?: string | undefined; confirmationToken?: string | undefined; }
+export function previewCrmQuoteLink(actor: SiteUser, input: { opportunityId: string; quoteId: string }): CrmQuoteLinkPreview {
   actor = guard(actor);
   const op = requireCrmOpportunity(actor, input.opportunityId);
+  const contact = requireCrmContact(actor, op.contactId);
   const quote = orcamentoDoUsuario(actor, input.quoteId);
   if (quote["owner_id"] !== op.ownerId)
     throw new Error("A proposta e a oportunidade devem pertencer ao mesmo responsável");
+  const previous = getDb().prepare("SELECT opportunity_id FROM crm_quote_links WHERE quote_id=?").get(input.quoteId);
+  if (previous && previous["opportunity_id"] !== op.id) throw new Error("Esta proposta já está vinculada a outra oportunidade");
+  const alreadyLinked = Boolean(previous);
+  const sameSource = op.sourceKind === "quote" && Boolean(op.sourceId) && op.sourceId === quote["source_request_id"];
+  const email = text(quote["customer_email"], 255).toLowerCase(), quotePhone = phone(quote["customer_phone"]);
+  const emailMatches = Boolean(email && contact.email && email === contact.email.toLowerCase());
+  const phoneMatches = Boolean(quotePhone && contact.phone && samePhone(quotePhone, contact.phone));
+  const reasons: string[] = [];
+  if (!alreadyLinked && !sameSource) {
+    if (op.sourceKind === "quote" && op.sourceId && quote["source_request_id"] && quote["source_request_id"] !== op.sourceId) reasons.push("A proposta e a oportunidade vieram de solicitações diferentes.");
+    if (email && contact.email && !emailMatches) reasons.push("O e-mail do cliente na proposta é diferente do contato.");
+    if (quotePhone && contact.phone && !phoneMatches) reasons.push("O telefone do cliente na proposta é diferente do contato.");
+    const company = fold(contact.company).trim();
+    const quoteCompanies = [quote["customer_name"], quote["customer_trade_name"]].map(value => fold(value).trim()).filter(Boolean);
+    if (company && quoteCompanies.length && !quoteCompanies.includes(company)) reasons.push("A empresa da proposta é diferente da empresa do contato.");
+    if (!emailMatches && !phoneMatches && !reasons.length) reasons.push(QUOTE_IDENTITY_UNVERIFIED);
+  }
+  const identity = { opportunityId: op.id, ownerId: op.ownerId, contactId: contact.id, contactName: contact.name, company: contact.company || "", phone: contact.phone, email: contact.email, quoteId: input.quoteId, quoteVersion: quote["version"], quoteOwner: quote["owner_id"], sourceKind: op.sourceKind || "", sourceId: op.sourceId || "", quoteSourceId: quote["source_request_id"] || "", quoteName: str(quote["customer_name"]), quoteTrade: str(quote["customer_trade_name"]), quoteEmail: email, quotePhone, alreadyLinked };
+  return { opportunityId: op.id, quoteId: input.quoteId, alreadyLinked, requiresConfirmation: reasons.length > 0, reasons,
+    contact: { name: contact.name, company: contact.company || "", phone: contact.phone, email: contact.email },
+    quote: { number: str(quote["number"]), customerName: str(quote["customer_name"] || quote["customer_trade_name"] || "Cliente não informado"), customerEmail: email, customerPhone: quotePhone }, confirmationToken: cursorHash(identity) };
+}
+function linkQuoteInternal(actor: SiteUser, input: LinkCrmQuoteInput, createdForContactId?: string) {
+  actor = guard(actor);
   return atomic(() => {
-    const previous = getDb()
-      .prepare("SELECT opportunity_id FROM crm_quote_links WHERE quote_id=?")
-      .get(input.quoteId);
-    if (previous && previous["opportunity_id"] !== op.id)
-      throw new Error("Esta proposta já está vinculada a outra oportunidade");
+    const preview = previewCrmQuoteLink(actor, input);
+    const op = requireCrmOpportunity(actor, input.opportunityId);
+    const trustedCreation = createdForContactId === op.contactId && preview.reasons.length === 1 && preview.reasons[0] === QUOTE_IDENTITY_UNVERIFIED;
+    const confirmedMismatch = preview.requiresConfirmation && !trustedCreation;
+    const justification = text(input.justification, 1000);
+    if (confirmedMismatch) {
+      if (!input.confirmMismatch || justification.length < 10) throw new Error("Confira o cliente da proposta e confirme a divergência com uma justificativa de pelo menos 10 caracteres.");
+      if (input.confirmationToken !== preview.confirmationToken) throw new Error("Os dados do vínculo mudaram. Confira novamente antes de confirmar.");
+    }
     const result = getDb()
       .prepare(
         "INSERT OR IGNORE INTO crm_quote_links(quote_id,opportunity_id,created_at,created_by) VALUES(?,?,?,?)",
       )
       .run(input.quoteId, op.id, now(), actor.id);
     if (result.changes) {
-      event(op.id, actor.id, "quote:linked", `Negociação ${quote["number"]} vinculada`);
+      event(op.id, actor.id, confirmedMismatch ? "quote:linked:confirmed_mismatch" : "quote:linked", confirmedMismatch ? `Negociação ${preview.quote.number} vinculada após conferência: ${justification}` : `Negociação ${preview.quote.number} vinculada`);
       getDb()
         .prepare("UPDATE crm_opportunities SET revision=revision+1,updated_at=? WHERE id=?")
         .run(now(), op.id);
@@ -726,6 +1002,7 @@ export function linkQuote(actor: SiteUser, input: { opportunityId: string; quote
     return requireCrmOpportunity(actor, op.id);
   });
 }
+export function linkQuote(actor: SiteUser, input: LinkCrmQuoteInput) { return linkQuoteInternal(actor, input); }
 export function createQuoteForOpportunity(
   actor: SiteUser,
   input: { opportunityId: string },
@@ -764,13 +1041,13 @@ export function createQuoteForOpportunity(
       );
   } else if (q["owner_id"] !== op.ownerId)
     throw new Error("Responsável da solicitação mudou; revise antes de vincular a proposta");
-  linkQuote(actor, { opportunityId: op.id, quoteId: created.id });
+  linkQuoteInternal(actor, { opportunityId: op.id, quoteId: created.id }, contact.id);
   return { ...created, detailUrl: `/interno/orcamentos-internos/${created.id}` };
 }
 
-function messageFromRow(r: Row): Message {
+function messageFromRow(r: Row, includeAttachments = true): Message {
   const db = getDb();
-  const attachments: CrmAttachment[] = db
+  const attachments: CrmAttachment[] = includeAttachments && db
     .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='crm_media'")
     .get()
     ? db
@@ -834,7 +1111,7 @@ export function listCrmMessagesPage(
   const selected = rows.slice(0, limit);
   const oldest = selected.at(-1);
   return {
-    messages: selected.reverse().map(messageFromRow),
+    messages: selected.reverse().map(row => messageFromRow(row)),
     hasMore,
     nextCursor:
       hasMore && oldest
@@ -852,7 +1129,7 @@ export function listCrmMessages(actor: SiteUser, contactId: string): Message[] {
         `SELECT * FROM (SELECT * FROM crm_messages WHERE contact_id=? ORDER BY sent_at DESC,id DESC LIMIT ${LIMIT}) ORDER BY sent_at,id`,
       )
       .all(contactId) as Row[]
-  ).map(messageFromRow);
+  ).map(row => messageFromRow(row));
 }
 /** Trusted server transport only. Never expose directly as an unauthenticated server function. */
 export function recordCrmMessage(input: RecordCrmMessageInput): Message {
@@ -903,7 +1180,11 @@ export function recordCrmMessage(input: RecordCrmMessageInput): Message {
       at,
       input.historical ? at : input.from === "vendedora" ? now() : null,
     );
-    if (!input.historical && !input.suppressOpportunityUpdate)
+    // Delayed live webhooks remain in the history/unread count, but cannot undo a newer reply.
+    const latest = !input.historical && !input.suppressOpportunityUpdate
+      ? db.prepare("SELECT sent_at FROM crm_messages WHERE contact_id=? AND id<>? ORDER BY sent_at DESC,id DESC LIMIT 1").get(input.contactId, id)
+      : null;
+    if (!input.historical && !input.suppressOpportunityUpdate && (!latest || at >= str(latest["sent_at"])))
       db.prepare(
         "UPDATE crm_opportunities SET awaiting_reply=?,last_interaction=CASE WHEN last_interaction<? THEN ? ELSE last_interaction END,revision=revision+1,updated_at=? WHERE contact_id=? AND stage NOT IN ('fechado','perdido')",
       ).run(Number(input.from === "cliente"), at, at, now(), input.contactId);
@@ -1009,43 +1290,33 @@ export function getCrmBootstrap(actor: SiteUser): CrmBootstrap {
   const db = ensureCrmSchema();
   const own = isAdmin(actor) ? "" : "WHERE owner_id=?";
   const args = isAdmin(actor) ? [] : [actor.id];
-  const contacts = (
+  const contactRows = (
     db
-      .prepare(`SELECT * FROM crm_contacts ${own} ORDER BY updated_at DESC,id LIMIT ${LIMIT}`)
+      .prepare(`SELECT c.*,${contactActivity} activity_at,${contactAttention} needs_attention FROM crm_contacts c ${isAdmin(actor) ? "" : "WHERE c.owner_id=?"} ORDER BY needs_attention DESC,activity_at DESC,c.id DESC LIMIT ${LIMIT}`)
       .all(...args) as Row[]
-  ).map(contactFromRow);
+  );
   const opportunities = (
     db
       .prepare(`SELECT * FROM crm_opportunities ${own} ORDER BY updated_at DESC,id LIMIT ${LIMIT}`)
       .all(...args) as Row[]
   ).map(opportunityFromRow);
+  // A bounded list must still contain the contacts referenced by the returned cards.
+  // Otherwise a perfectly valid opportunity can be hidden solely because its contact was not recently edited.
+  const contactIds = new Set(contactRows.map(row => str(row["id"])));
+  const missingIds = [...new Set(opportunities.map(opportunity => opportunity.contactId))].filter(id => !contactIds.has(id));
+  if (missingIds.length) contactRows.push(...db.prepare(`SELECT * FROM crm_contacts WHERE id IN (${missingIds.map(() => "?").join(",")}) ${isAdmin(actor) ? "" : "AND owner_id=?"}`).all(...missingIds, ...args) as Row[]);
+  const contacts = contactRows.map(contactFromRow);
   const tasks = (
     db
       .prepare(
-        `SELECT t.* FROM crm_tasks t JOIN crm_opportunities o ON o.id=t.opportunity_id ${isAdmin(actor) ? "" : "WHERE o.owner_id=?"} ORDER BY t.due,t.id LIMIT ${LIMIT}`,
+        `SELECT t.* FROM crm_tasks t JOIN crm_opportunities o ON o.id=t.opportunity_id ${isAdmin(actor) ? "" : "WHERE o.owner_id=?"} ORDER BY CASE WHEN t.status='pending' THEN 0 ELSE 1 END,t.due,t.id LIMIT ${LIMIT}`,
       )
       .all(...args) as Row[]
   ).map(taskFromRow);
   const tasksDone = tasks
     .filter((t) => t.status === "done")
     .map((t) => ({ id: t.id, opportunityId: t.opportunityId, label: t.label, at: t.completedAt! }));
-  const conversations = contacts.map((contact) => {
-    const messages = listCrmMessages(actor, contact.id);
-    const unread = Number(
-      db
-        .prepare(
-          "SELECT count(*) n FROM crm_messages WHERE contact_id=? AND sender='cliente' AND read_at IS NULL",
-        )
-        .get(contact.id)?.["n"],
-    );
-    return {
-      id: contact.id,
-      contactId: contact.id,
-      unread,
-      messages,
-      channel: messages.at(-1)?.channel || "whatsapp",
-    };
-  });
+  const conversations = conversationSummaries(contacts.map(contact => contact.id));
   const owners = db
     .prepare(
       `SELECT id,COALESCE(NULLIF(display_name,''),email) name FROM users WHERE disabled=0 AND EXISTS(SELECT 1 FROM json_each(users.roles) WHERE value IN ('admin','comercial')) ${isAdmin(actor) ? "" : "AND id=?"} ORDER BY name`,
@@ -1071,6 +1342,7 @@ export function getCrmBootstrap(actor: SiteUser): CrmBootstrap {
         )
         .get(...args)?.["n"],
     ),
+    awaitingContacts: Number(db.prepare(`SELECT count(*) n FROM crm_contacts c WHERE ${contactAttention} ${isAdmin(actor) ? "" : "AND c.owner_id=?"}`).get(...args)?.["n"]),
   };
   return {
     contacts,
@@ -1111,7 +1383,7 @@ export function getOpportunityDetail(actor: SiteUser, id: string) {
   }));
   const tasks = (
     getDb()
-      .prepare(`SELECT * FROM crm_tasks WHERE opportunity_id=? ORDER BY due,id LIMIT ${LIMIT}`)
+      .prepare(`SELECT * FROM crm_tasks WHERE opportunity_id=? ORDER BY CASE WHEN status='pending' THEN 0 ELSE 1 END,due,id LIMIT ${LIMIT}`)
       .all(id) as Row[]
   ).map(taskFromRow);
   return {
@@ -1119,6 +1391,7 @@ export function getOpportunityDetail(actor: SiteUser, id: string) {
     contact,
     activities,
     tasks,
-    proposals: allProposals(actor).filter((p) => p.opportunityId === id),
+    proposals: allProposals(actor, id),
+    tasksTruncated: Number(getDb().prepare("SELECT count(*) n FROM crm_tasks WHERE opportunity_id=?").get(id)?.["n"]) > LIMIT,
   };
 }

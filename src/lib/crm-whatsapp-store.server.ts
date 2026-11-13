@@ -264,12 +264,20 @@ export function ingestWahaMessage(input: IngestWahaMessageInput): {
     });
     if (!input.historical && opportunityId && !triageReason) {
       const op = requireCrmOpportunity(actor, opportunityId);
-      if (createdOpportunity || at.toISOString() >= op.lastInteraction)
+      // Connector pages are newest first. An older incoming page may open the opportunity only
+      // after a newer phone reply was already stored, so initialize it from the saved timeline.
+      const latest = createdOpportunity
+        ? db.prepare("SELECT sender,sent_at FROM crm_messages WHERE contact_id=? AND provider='waha' AND account=? AND sender IN ('cliente','vendedora') ORDER BY sent_at DESC,id DESC LIMIT 1").get(contact.id, session)
+        : null;
+      const newer = latest && String(latest["sent_at"]) > at.toISOString();
+      const interactionAt = newer ? String(latest["sent_at"]) : at.toISOString();
+      const awaitingReply = newer ? latest["sender"] === "cliente" : input.from === "cliente";
+      if (createdOpportunity || interactionAt >= op.lastInteraction)
         db.prepare(
           "UPDATE crm_opportunities SET awaiting_reply=?,last_interaction=?,revision=revision+1,updated_at=? WHERE id=?",
         ).run(
-          Number(input.from === "cliente"),
-          at.toISOString(),
+          Number(awaitingReply),
+          interactionAt,
           new Date().toISOString(),
           opportunityId,
         );

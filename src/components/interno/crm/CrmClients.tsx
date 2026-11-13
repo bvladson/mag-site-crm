@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import {
   ArrowLeft,
@@ -8,34 +8,70 @@ import {
   FileText,
   MessageCircle,
   Plus,
-  Search,
   Sparkles,
   Users,
   Pencil,
   Clock,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { getOpportunityDetail } from "@/lib/crm.functions";
+import {
+  getOpportunityDetail,
+  getCrmContactsPage,
+  getCrmConversationPage,
+} from "@/lib/crm.functions";
+import { Loading } from "@/components/interno/ui";
 import { cn } from "@/lib/utils";
 import { useCrm } from "./CrmProvider";
 import { Avatar, EmptyState, NextActionLine, OriginBadge, StageBadge } from "./bits";
-import { fullDate, money, normalize } from "./format";
+import { fullDate, money } from "./format";
+import { ContactMatchHint, ContactSearch, ContactSearchPreparing } from "./ContactSearch";
+import { WahaContactsButton } from "./WahaContactsDialog";
 
 export function CrmClients({ selected }: { selected: string | undefined }) {
   const navigate = useNavigate();
-  const { contacts, opportunities, open } = useCrm();
+  const { open, viewerId } = useCrm();
   const [query, setQuery] = useState("");
-  const list = contacts.filter(
-    (customer) =>
-      !query ||
-      normalize(
-        `${customer.name} ${customer.company ?? ""} ${customer.phone} ${customer.email} ${opportunities
-          .filter((item) => item.contactId === customer.id)
-          .map((item) => item.interest)
-          .join(" ")}`,
-      ).includes(normalize(query)),
+  const [search, setSearch] = useState("");
+  const [searchMode, setSearchMode] = useState<"contacts" | "all">("contacts");
+  const pollingStartedAt = useRef(Date.now());
+  useEffect(() => {
+    pollingStartedAt.current = Date.now();
+  }, [search, searchMode]);
+  const loadPage = useServerFn(getCrmContactsPage);
+  useEffect(() => {
+    const timer = setTimeout(() => setSearch(query.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [query]);
+  const pages = useInfiniteQuery({
+    queryKey: ["interno", "crm", "clients-page", viewerId, search, searchMode],
+    queryFn: ({ pageParam }) =>
+      loadPage({
+        data: { search, searchMode, limit: 50, ...(pageParam ? { before: pageParam } : {}) },
+      }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (page) => (page.hasMore ? page.nextCursor : undefined),
+    refetchInterval: (query) =>
+      searchMode === "all" &&
+      Boolean(search) &&
+      query.state.data?.pages.some((page) => page.searchIndex?.ready === false)
+        ? Date.now() - pollingStartedAt.current < 60_000 && query.state.data.pages.length === 1
+          ? 2_000
+          : false
+        : false,
+    staleTime: 10_000,
+    retry: 1,
+  });
+  const list = [
+    ...new Map(
+      (pages.data?.pages.flatMap((page) => page.contacts) ?? []).map((item) => [item.id, item]),
+    ).values(),
+  ];
+  const matches = new Map(
+    pages.data?.pages.flatMap((page) => Object.entries(page.matches ?? {})) ?? [],
   );
+  const preparingSearch =
+    pages.data?.pages.some((page) => page.searchIndex?.ready === false) ?? false;
   const select = (id?: string) =>
     navigate({ to: "/interno/crm/clientes", search: id ? { id } : {} });
   return (
@@ -54,19 +90,40 @@ export function CrmClients({ selected }: { selected: string | undefined }) {
               Novo cliente
             </Button>
           </div>
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              aria-label="Buscar clientes"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Nome, telefone ou interesse"
-              className="pl-9"
+          <ContactSearch
+            label="Buscar clientes"
+            value={query}
+            onChange={setQuery}
+            mode={searchMode}
+            onModeChange={setSearchMode}
+          />
+          <WahaContactsButton destination="clients" className="w-full" />
+          {search && pages.data && (
+            <p role="status" className="text-xs text-muted-foreground">
+              {pages.data.pages[0]?.total ?? 0} cliente(s) encontrado(s)
+            </p>
+          )}
+          {preparingSearch && (
+            <ContactSearchPreparing
+              refreshing={pages.isFetching}
+              onRefresh={() => {
+                pollingStartedAt.current = Date.now();
+                void pages.refetch();
+              }}
             />
-          </div>
+          )}
         </div>
         <ul className="max-h-[65vh] flex-1 overflow-y-auto">
-          {list.length ? (
+          {pages.isLoading ? (
+            <li className="p-4 text-sm text-muted-foreground">Carregando clientes…</li>
+          ) : pages.isError ? (
+            <li role="alert" className="space-y-2 p-4 text-sm text-destructive">
+              <p>Não foi possível buscar os clientes.</p>
+              <Button variant="outline" size="sm" onClick={() => void pages.refetch()}>
+                Tentar novamente
+              </Button>
+            </li>
+          ) : list.length ? (
             list.map((customer) => (
               <li key={customer.id}>
                 <button
@@ -86,10 +143,9 @@ export function CrmClients({ selected }: { selected: string | undefined }) {
                         customer.email ||
                         "Sem contato informado"}
                     </p>
+                    {search && <ContactMatchHint match={matches.get(customer.id)} />}
                   </div>
-                  <span className="text-xs text-muted-foreground">
-                    {opportunities.filter((item) => item.contactId === customer.id).length} oport.
-                  </span>
+                  <span className="text-xs text-muted-foreground">Ver ficha</span>
                 </button>
               </li>
             ))
@@ -98,6 +154,19 @@ export function CrmClients({ selected }: { selected: string | undefined }) {
               {query
                 ? "Nenhum cliente neste filtro."
                 : "Cadastre um cliente ou traga uma entrada do site para começar."}
+            </li>
+          )}
+          {pages.hasNextPage && (
+            <li className="p-3 text-center">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={pages.isFetchingNextPage || preparingSearch}
+                onClick={() => void pages.fetchNextPage()}
+              >
+                {pages.isFetchingNextPage && <Loader2 className="size-3 animate-spin" />}Carregar
+                mais clientes
+              </Button>
             </li>
           )}
         </ul>
@@ -120,9 +189,20 @@ export function CrmClients({ selected }: { selected: string | undefined }) {
 }
 
 function ClientDetail({ id, onBack }: { id: string; onBack: () => void }) {
-  const { contact, opportunities, conversations, proposals, tasksDone, open, units } = useCrm();
+  const {
+    contact,
+    opportunities,
+    proposals,
+    tasksDone,
+    open,
+    units,
+    entityLoading,
+    contactOpportunitiesTruncated,
+    viewerId,
+  } = useCrm();
   const navigate = useNavigate();
   const detail = useServerFn(getOpportunityDetail);
+  const readMessages = useServerFn(getCrmConversationPage);
   const customer = contact(id);
   const related = opportunities.filter((item) => item.contactId === id);
   const ids = related.map((item) => item.id);
@@ -132,6 +212,19 @@ function ClientDetail({ id, onBack }: { id: string; onBack: () => void }) {
     enabled: Boolean(customer) && ids.length > 0,
     staleTime: 10_000,
   });
+  const history = useInfiniteQuery({
+    queryKey: ["interno", "crm", "client-messages", viewerId, id],
+    queryFn: ({ pageParam }) =>
+      readMessages({
+        data: { contactId: id, limit: 50, ...(pageParam ? { before: pageParam } : {}) },
+      }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (page) => (page.hasMore ? page.nextCursor : undefined),
+    enabled: Boolean(customer),
+    staleTime: 10_000,
+    retry: 1,
+  });
+  if (!customer && entityLoading) return <Loading />;
   if (!customer)
     return (
       <div className="p-6">
@@ -156,17 +249,20 @@ function ClientDetail({ id, onBack }: { id: string; onBack: () => void }) {
       title: `Entrada: ${item.title}`,
       text: `Origem: ${item.origin}`,
     })),
-    ...conversations
-      .filter((item) => item.contactId === id)
-      .flatMap((item) =>
-        item.messages.map((message) => ({
-          id: `message-${message.id}`,
-          at: message.at,
-          icon: MessageCircle,
-          title: message.from === "cliente" ? "Mensagem recebida" : "Mensagem enviada",
-          text: message.text,
-        })),
-      ),
+    ...[
+      ...new Map(
+        (history.data?.pages.flatMap((page) => page.messages) ?? []).map((message) => [
+          message.id,
+          message,
+        ]),
+      ).values(),
+    ].map((message) => ({
+      id: `message-${message.id}`,
+      at: message.at,
+      icon: MessageCircle,
+      title: message.from === "cliente" ? "Mensagem recebida" : "Mensagem enviada",
+      text: message.text,
+    })),
     ...tasksDone
       .filter((item) => opportunityIds.has(item.opportunityId))
       .map((item) => ({
@@ -249,6 +345,12 @@ function ClientDetail({ id, onBack }: { id: string; onBack: () => void }) {
       </div>
       <section>
         <h3 className="mb-3 font-semibold">Oportunidades ({related.length})</h3>
+        {contactOpportunitiesTruncated && (
+          <p className="mb-3 text-xs text-muted-foreground">
+            Exibindo as oportunidades mais recentes deste cliente. Consulte as negociações para os
+            registros anteriores.
+          </p>
+        )}
         {related.length ? (
           <div className="grid gap-3 lg:grid-cols-2">
             {related.map((item) => (
@@ -275,6 +377,17 @@ function ClientDetail({ id, onBack }: { id: string; onBack: () => void }) {
       </section>
       <section>
         <h3 className="mb-4 font-semibold">Linha do tempo</h3>
+        {history.isLoading && (
+          <p className="mb-3 text-sm text-muted-foreground">Carregando mensagens…</p>
+        )}
+        {history.isError && (
+          <p role="alert" className="mb-3 text-sm text-destructive">
+            Não foi possível atualizar as mensagens.{" "}
+            <button type="button" className="underline" onClick={() => void history.refetch()}>
+              Tentar novamente
+            </button>
+          </p>
+        )}
         {activities.isError && (
           <p role="alert" className="mb-3 text-sm text-destructive">
             Não foi possível atualizar os eventos das oportunidades.
@@ -299,6 +412,18 @@ function ClientDetail({ id, onBack }: { id: string; onBack: () => void }) {
           <p className="text-sm text-muted-foreground">
             Os próximos atendimentos e atividades aparecerão aqui.
           </p>
+        )}
+        {history.hasNextPage && (
+          <Button
+            className="mt-4"
+            size="sm"
+            variant="outline"
+            disabled={history.isFetchingNextPage}
+            onClick={() => void history.fetchNextPage()}
+          >
+            {history.isFetchingNextPage && <Loader2 className="size-3 animate-spin" />}Carregar
+            mensagens anteriores
+          </Button>
         )}
       </section>
     </div>

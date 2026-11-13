@@ -12,8 +12,9 @@ import { join } from "node:path";
 import { z } from "zod";
 import { audit, dataDirectory, getDb } from "./local-db.server.ts";
 import { requireActiveUser, type SiteUser } from "./local-auth-core.server.ts";
-import { ensureCrmSchema, requireCrmContact, updateCrmMessageStatus } from "./crm.server.ts";
-import { samePhone } from "./br-phone.ts";
+import { createContact, ensureCrmSchema, requireCrmContact, updateCrmMessageStatus } from "./crm.server.ts";
+import { brPhoneVariants, normalizeBrPhone, samePhone } from "./br-phone.ts";
+import type { WahaCatalogContact, WahaContactCatalogInput, WahaContactCatalogPage, WahaContactImportInput } from "./crm-waha-contacts.ts";
 import { site } from "../config/site.ts";
 import { readPublicSiteContent } from "./site-content.server.ts";
 
@@ -142,7 +143,8 @@ export function ensureWahaSchema() {
     CREATE TABLE IF NOT EXISTS crm_waha_runtime(session TEXT PRIMARY KEY,state TEXT NOT NULL,updated_at TEXT NOT NULL,error_code TEXT);
     CREATE TABLE IF NOT EXISTS crm_waha_lines(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),session TEXT NOT NULL UNIQUE,expected_phone TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')),revision INTEGER NOT NULL DEFAULT 1,created_by TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
     CREATE UNIQUE INDEX IF NOT EXISTS crm_waha_lines_one_active ON crm_waha_lines(user_id) WHERE status='active';
-    CREATE TABLE IF NOT EXISTS crm_waha_recovery(session TEXT PRIMARY KEY,state TEXT NOT NULL,passes INTEGER NOT NULL DEFAULT 0,cursor TEXT,processed INTEGER NOT NULL DEFAULT 0,available_at INTEGER NOT NULL,updated_at TEXT NOT NULL,error_code TEXT,offline_since INTEGER,mode TEXT,window_start INTEGER,new_chats INTEGER NOT NULL DEFAULT 0);`);
+    CREATE TABLE IF NOT EXISTS crm_waha_recovery(session TEXT PRIMARY KEY,state TEXT NOT NULL,passes INTEGER NOT NULL DEFAULT 0,cursor TEXT,processed INTEGER NOT NULL DEFAULT 0,available_at INTEGER NOT NULL,updated_at TEXT NOT NULL,error_code TEXT,offline_since INTEGER,mode TEXT,window_start INTEGER,new_chats INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS crm_waha_watermarks(session TEXT PRIMARY KEY,baseline INTEGER NOT NULL,covered_until INTEGER NOT NULL,last_probe INTEGER NOT NULL DEFAULT 0);`);
   // Builds of 09/11 (homologation only) created crm_waha_recovery without the reconnection columns.
   const recoveryColumns = new Set(
     (db.prepare("PRAGMA table_info(crm_waha_recovery)").all() as Row[]).map((column) =>
@@ -154,6 +156,10 @@ export function ensureWahaSchema() {
     ["mode", "TEXT"],
     ["window_start", "INTEGER"],
     ["new_chats", "INTEGER NOT NULL DEFAULT 0"],
+    ["window_end", "INTEGER"],
+    ["failed_count", "INTEGER NOT NULL DEFAULT 0"],
+    ["failure_attempts", "INTEGER NOT NULL DEFAULT 0"],
+    ["has_more", "INTEGER NOT NULL DEFAULT 0"],
   ] as const)
     if (!recoveryColumns.has(name)) db.exec(`ALTER TABLE crm_waha_recovery ADD COLUMN ${name} ${type}`);
   canonicalizeStoredMessageIds(db);
@@ -444,6 +450,17 @@ const webhookUrl = () => {
 export function isWahaSelected() {
   return configuration().config.enabled;
 }
+/** Operational metadata only. An uncertain send is never retried by this read. */
+export function readWahaOutbox(actor: SiteUser, input: { contactId?: string | undefined; lineId?: string | undefined } = {}) {
+  const user = commercial(actor), db = ensureWahaSchema();
+  const clauses = ["(o.state IN ('sending','uncertain') OR o.error_code IS NOT NULL)"];
+  const values: string[] = [];
+  if (!isAdmin(user)) { clauses.push("c.owner_id=?"); values.push(user.id); }
+  if (input.contactId) { requireCrmContact(user, input.contactId); clauses.push("o.contact_id=?"); values.push(input.contactId); }
+  if (input.lineId) { const line = resolveLine(user, input.lineId); clauses.push("o.session=?"); values.push(line.session); }
+  const rows = db.prepare(`SELECT o.id,o.contact_id,o.actor_id,c.owner_id,o.state,o.error_code,o.created_at,o.updated_at,o.message_id FROM crm_waha_outbox o JOIN crm_contacts c ON c.id=o.contact_id WHERE ${clauses.join(" AND ")} ORDER BY o.updated_at DESC,o.id LIMIT 50`).all(...values);
+  return { items: rows.map(row => ({ id: String(row["id"]), contactId: String(row["contact_id"]), actorId: String(row["actor_id"]), ownerId: String(row["owner_id"]), state: String(row["state"]), errorCode: row["error_code"] ? String(row["error_code"]) : null, createdAt: String(row["created_at"]), updatedAt: String(row["updated_at"]), hasMessage: Boolean(row["message_id"]) })) };
+}
 export async function readWahaContactContext(actor: SiteUser, contactId: string) {
   const user = commercial(actor),
     { config } = configuration();
@@ -574,6 +591,11 @@ export function saveWahaSettings(actor: SiteUser, raw: z.input<typeof wahaSettin
         "INSERT INTO crm_waha_config VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,encrypted=excluded.encrypted,updated_at=excluded.updated_at",
       )
       .run(revision + 1, encrypt(config), now());
+    if (!config.enabled) {
+      // Deliberate disabled periods never become an implicit historical import later.
+      getDb().prepare("DELETE FROM crm_waha_watermarks").run();
+      getDb().prepare("UPDATE crm_waha_recovery SET state='cancelled',offline_since=NULL,window_start=NULL,window_end=NULL,cursor=NULL,has_more=0,failed_count=0 WHERE state!='cancelled'").run();
+    }
     audit(user.id, "crm:waha:settings", null, {
       revision: revision + 1,
       enabled: config.enabled,
@@ -696,6 +718,7 @@ export async function setWahaLineStatus(
         "UPDATE crm_waha_recovery SET state='cancelled',offline_since=NULL,mode=NULL,window_start=NULL,cursor=NULL,updated_at=? WHERE session=?",
       )
       .run(now(), line.session);
+    ensureWahaSchema().prepare("DELETE FROM crm_waha_watermarks WHERE session=?").run(line.session);
   } else {
     validateOwner(line.userId);
     if (activeLineOf(line.userId)) throw new Error("Esta vendedora já tem outra linha ativa.");
@@ -798,15 +821,20 @@ function markOffline(session: string, mode: "paused" | "unlinked" | null, online
 }
 /** What the seller sees about the catch-up after a reconnection (counts only, never content). */
 function recoverySummary(row: Row | undefined) {
-  if (!row || !["pending", "done"].includes(String(row["state"]))) return null;
+  if (!row || !["pending", "done", "partial", "error"].includes(String(row["state"]))) return null;
+  // Older builds marked a capped scan as done. Never present that result as complete.
+  const legacyPartial = row["state"] === "done" && Boolean(row["error_code"]);
   return {
-    state: String(row["state"]) as "pending" | "done",
+    state: (legacyPartial ? "partial" : String(row["state"])) as "pending" | "done" | "partial" | "error",
     processed: Number(row["processed"] || 0),
     newChats: Number(row["new_chats"] || 0),
     /** False: first connection or unknown gap, only the seller's existing conversations are completed. */
     includesNewChats: row["window_start"] !== null && row["window_start"] !== undefined,
     nextAt: row["state"] === "pending" ? new Date(Number(row["available_at"])).toISOString() : null,
     updatedAt: String(row["updated_at"]),
+    errorCode: row["error_code"] ? String(row["error_code"]) : null,
+    hasMore: Boolean(row["has_more"]) || legacyPartial || ["partial", "error"].includes(String(row["state"])),
+    failedCount: Number(row["failed_count"] || 0),
   };
 }
 function canReplyWithWaha(user: SiteUser, config: WahaConfig) {
@@ -1881,6 +1909,45 @@ const RECOVERY_SECOND_PASS_MS = 15 * 60_000;
 const RECOVERY_OVERLAP_S = 600;
 const RECOVERY_MAX_CHATS = 300;
 const RECOVERY_MAX_MESSAGES = 100;
+const RECONCILE_INTERVAL_MS = 60_000;
+function watermarkOf(session: string) {
+  return ensureWahaSchema().prepare("SELECT * FROM crm_waha_watermarks WHERE session=?").get(session) as Row | undefined;
+}
+function baselineWorkingSession(session: string) {
+  const seconds = Math.floor(Date.now() / 1000);
+  ensureWahaSchema().prepare("INSERT OR IGNORE INTO crm_waha_watermarks(session,baseline,covered_until,last_probe) VALUES(?,?,?,?)").run(session, seconds, seconds, Date.now());
+}
+/** Independent of webhook delivery. First observation only sets a baseline, never imports history. */
+async function reconcileWorkingLines() {
+  const { config: settings } = configuration();
+  if (!settings.enabled || !settings.apiKey || !settings.hmacKey) return;
+  const db = ensureWahaSchema();
+  const lines = activeLines().filter(line => line.expectedPhone && (!watermarkOf(line.session) || Date.now() - Number(watermarkOf(line.session)!["last_probe"]) >= RECONCILE_INTERVAL_MS));
+  if (!lines.length) return;
+  let list: any;
+  try { list = await (await api(settings, "/api/sessions?all=true")).json(); } catch { return; }
+  if (!Array.isArray(list)) return;
+  const sessions = new Map(list.map((item: any) => [String(item?.name), item]));
+  for (const line of lines) {
+    const config = withLine(settings, line), info = sessions.get(line.session), marker = watermarkOf(line.session);
+    if (marker) db.prepare("UPDATE crm_waha_watermarks SET last_probe=? WHERE session=?").run(Date.now(), line.session);
+    try { validateOwner(line.userId); } catch { continue; }
+    if (info?.status !== "WORKING" || !numberMatches(config, info)) {
+      if (marker && info?.status !== "WORKING" && recoveryOf(line.session)?.["offline_since"] == null) markOffline(line.session, null, true);
+      continue;
+    }
+    if (!marker) { baselineWorkingSession(line.session); continue; }
+    const previous = recoveryOf(line.session);
+    if (previous && (["partial", "error"].includes(String(previous["state"])) || (["pending", "idle"].includes(String(previous["state"])) && (previous["window_start"] != null || previous["offline_since"] != null)))) {
+      if (previous["state"] === "idle") scheduleRecovery(line.session);
+      continue;
+    }
+    const end = Math.floor(Date.now() / 1000);
+    if (end <= Number(marker["covered_until"])) continue;
+    const start = Math.max(Number(marker["baseline"]), Number(marker["covered_until"]) - RECOVERY_OVERLAP_S);
+    db.prepare("INSERT INTO crm_waha_recovery(session,state,passes,cursor,processed,available_at,updated_at,window_start,window_end,new_chats,has_more,failed_count,failure_attempts,mode) VALUES(?,'pending',0,NULL,0,?,?,?,?,0,0,0,0,'reconcile') ON CONFLICT(session) DO UPDATE SET state='pending',passes=0,cursor=NULL,processed=0,available_at=excluded.available_at,updated_at=excluded.updated_at,error_code=NULL,window_start=excluded.window_start,window_end=excluded.window_end,new_chats=0,has_more=0,failed_count=0,failure_attempts=0,mode='reconcile'").run(line.session, Date.now(), now(), start, end);
+  }
+}
 function scheduleRecovery(session: string) {
   const row = recoveryOf(session);
   const gap = row?.["offline_since"]
@@ -1891,12 +1958,16 @@ function scheduleRecovery(session: string) {
     row && row["state"] !== "done" && row["window_start"] !== null && row["window_start"] !== undefined
       ? Number(row["window_start"])
       : null;
-  const start = gap === null ? kept : kept === null ? gap : Math.min(gap, kept);
+  const rawStart = gap === null ? kept : kept === null ? gap : Math.min(gap, kept);
+  // A first connection (or return from a disabled period) never imports the phone's past.
+  if (rawStart === null) return;
+  const marker = watermarkOf(session);
+  const start = marker ? Math.max(Number(marker["baseline"]), rawStart) : rawStart;
   ensureWahaSchema()
     .prepare(
-      "INSERT INTO crm_waha_recovery(session,state,passes,cursor,processed,available_at,updated_at,window_start,new_chats) VALUES(?,'pending',0,NULL,0,?,?,?,0) ON CONFLICT(session) DO UPDATE SET state='pending',passes=0,cursor=NULL,processed=0,new_chats=0,available_at=excluded.available_at,updated_at=excluded.updated_at,error_code=NULL,window_start=excluded.window_start,offline_since=NULL,mode=NULL",
+      "INSERT INTO crm_waha_recovery(session,state,passes,cursor,processed,available_at,updated_at,window_start,new_chats,window_end,failed_count,has_more,failure_attempts) VALUES(?,'pending',0,NULL,0,?,?,?,0,?,0,0,0) ON CONFLICT(session) DO UPDATE SET state='pending',passes=0,cursor=NULL,processed=0,new_chats=0,available_at=excluded.available_at,updated_at=excluded.updated_at,error_code=NULL,window_start=excluded.window_start,window_end=excluded.window_end,offline_since=NULL,mode=NULL,failed_count=0,has_more=0,failure_attempts=0",
     )
-    .run(session, Date.now() + RECOVERY_DELAY_MS, now(), start);
+    .run(session, Date.now() + RECOVERY_DELAY_MS, now(), start, Math.floor(Date.now() / 1000));
 }
 async function processEvent(payload: any) {
   const { config: settings } = configuration();
@@ -1918,7 +1989,10 @@ async function processEvent(payload: any) {
       "INSERT INTO crm_waha_runtime VALUES(?,?,?,?) ON CONFLICT(session) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at,error_code=excluded.error_code",
     ).run(config.session, state, now(), another ? "number_mismatch" : null);
     if (another) await rejectAnotherPhone(config, null);
-    else if (state === "WORKING" && previous !== "WORKING") scheduleRecovery(config.session);
+    else if (state === "WORKING" && previous !== "WORKING") {
+      if (numberMatches(config, info)) baselineWorkingSession(config.session);
+      scheduleRecovery(config.session);
+    }
     else if (state !== "WORKING" && wasOnline) markOffline(config.session, null, true);
     return;
   }
@@ -1960,205 +2034,108 @@ async function processEvent(payload: any) {
   }
   await processMessage(config, payload.payload, false, undefined, payload.me);
 }
-/** Messages of one conversation since `since` (seconds), oldest first: the newest 100 at most. */
-async function windowMessages(config: WahaConfig, chatId: string, since: number) {
+/** One bounded page; the fixed end prevents new live messages from shifting offsets. */
+async function windowMessages(config: WahaConfig, chatId: string, since: number, pageOffset = 0, until = Math.floor(Date.now() / 1000)) {
   const list: any[] = [];
-  for (let offset = 0; offset < RECOVERY_MAX_MESSAGES; offset += 25) {
-    const response = (await (
-      await api(
-        config,
-        `/api/${encodeURIComponent(config.session)}/chats/${encodeURIComponent(chatId)}/messages?limit=25&offset=${offset}&filter.timestamp.gte=${since}&downloadMedia=false`,
-      )
-    ).json()) as any;
-    const page = Array.isArray(response) ? response : response?.messages || response?.data || [];
-    if (!Array.isArray(page)) break;
+  let more = false;
+  for (let offset = pageOffset; offset < pageOffset + RECOVERY_MAX_MESSAGES; offset += 25) {
+    const response = await (await api(config, `/api/${encodeURIComponent(config.session)}/chats/${encodeURIComponent(chatId)}/messages?limit=25&offset=${offset}&filter.timestamp.gte=${since}&filter.timestamp.lte=${until}&downloadMedia=false`)).json() as any;
+    const page = Array.isArray(response) ? response : response?.messages || response?.data;
+    if (!Array.isArray(page)) throw new Error("invalid_history");
     list.push(...page.slice(0, 25));
     if (page.length < 25) break;
   }
-  // WAHA lists newest first; the CRM records them in the order they happened, so the last message
-  // decides whether the conversation awaits a reply.
-  return {
-    truncated: list.length >= RECOVERY_MAX_MESSAGES,
-    messages: list
-      .map((message, index) => ({ message, index }))
-      .sort(
-        (a, b) =>
-          (Number(a.message?.timestamp) || 0) - (Number(b.message?.timestamp) || 0) ||
-          b.index - a.index,
-      )
-      .map((item) => item.message),
+  if (list.length === RECOVERY_MAX_MESSAGES) {
+    const response = await (await api(config, `/api/${encodeURIComponent(config.session)}/chats/${encodeURIComponent(chatId)}/messages?limit=1&offset=${pageOffset + RECOVERY_MAX_MESSAGES}&filter.timestamp.gte=${since}&filter.timestamp.lte=${until}&downloadMedia=false`)).json() as any;
+    const page = Array.isArray(response) ? response : response?.messages || response?.data;
+    if (!Array.isArray(page)) throw new Error("invalid_history");
+    more = page.length > 0;
+  }
+  return { truncated: more, messages: list.map((message, index) => ({ message, index })).sort((a,b) => (Number(a.message?.timestamp) || 0) - (Number(b.message?.timestamp) || 0) || b.index-a.index).map(item => item.message) };
+}
+type RecoveryPage = { chatId: string; pageOffset: number; since: number };
+type RecoveryCursor = { version: 3; catalogOffset: number; catalogDone: boolean; loaded: boolean; tasks: RecoveryPage[]; index: number; subindex: number; page: string | null; pageMore: boolean; deferred: RecoveryPage[]; failed: RecoveryPage[]; failedKeys: string[]; until: number };
+type RecoveryStep = { complete: boolean; cursor: string | null; processed: number; created: number; truncated: boolean; failedCount: number; needsRetry?: boolean };
+/** Checkpoints contain metadata and at most one encrypted page, never message text in clear. */
+async function recoverWindow(config: WahaConfig, due: Row, deadline: number, me: any, historical = false): Promise<RecoveryStep | "unavailable"> {
+  const db = ensureWahaSchema(), since = Number(due["window_start"] || 0);
+  let cursor: RecoveryCursor | null = null;
+  try { const saved = due["cursor"] ? JSON.parse(String(due["cursor"])) : null; if (saved?.version === 3 && Array.isArray(saved.tasks)) cursor = saved; } catch { /* Start the same window again; message IDs make replay safe. */ }
+  if (!cursor) {
+    cursor = { version: 3, catalogOffset: 0, catalogDone: historical, loaded: false, tasks: [], index: 0, subindex: 0, page: null, pageMore: false, deferred: [], failed: [], failedKeys: [], until: Number(due["window_end"]) || Math.floor(Date.now()/1000) };
+    if (historical) {
+      const bindings = db.prepare("SELECT chat_id,contact_id FROM crm_whatsapp_bindings WHERE session=? ORDER BY id").all(config.session);
+      for (const binding of bindings) {
+        const last = db.prepare("SELECT max(sent_at) at FROM crm_messages WHERE provider='waha' AND account=? AND contact_id=?").get(config.session, String(binding["contact_id"]))?.["at"];
+        if (last) cursor.tasks.push({ chatId: String(binding["chat_id"]), pageOffset: 0, since: Math.floor(new Date(String(last)).getTime()/1000) - RECOVERY_OVERLAP_S });
+      }
+    }
+  }
+  if (!cursor.loaded) {
+    try {
+      for (let fetched = 0; !cursor.catalogDone && fetched < RECOVERY_MAX_CHATS; fetched += 50) {
+        // NOWEB 2026.10.1 supports sorting by id. Activity ordering would move an unseen chat
+        // behind the offset when it receives a new message between continuation requests.
+        const response = await (await api(config, `/api/${encodeURIComponent(config.session)}/chats?limit=50&offset=${cursor.catalogOffset}&sortBy=id&sortOrder=asc`)).json() as any;
+        const page = Array.isArray(response) ? response : response?.chats || response?.data;
+        if (!Array.isArray(page)) return "unavailable";
+        for (const chat of page.slice(0,50)) {
+          const id = txt(typeof chat?.id === "string" ? chat.id : chat?.id?._serialized, 200).replace(/@s\.whatsapp\.net$/, "@c.us");
+          if (/^\d+@(c\.us|lid)$/.test(id) && !cursor.tasks.some(task => task.chatId === id && task.pageOffset === 0)) cursor.tasks.push({ chatId: id, pageOffset: 0, since });
+        }
+        cursor.catalogOffset += 50;
+        if (page.length < 50) cursor.catalogDone = true;
+        if (Date.now() > deadline) break;
+      }
+    } catch { return "unavailable"; }
+    cursor.loaded = true;
+  }
+  const identities = new Map<string, Awaited<ReturnType<typeof resolveIdentity>>>();
+  let processed = 0, created = 0;
+  const result = (complete: boolean, truncated = false, needsRetry = false, failedCount = cursor!.failedKeys.length): RecoveryStep => ({ complete, cursor: complete ? null : JSON.stringify(cursor), processed, created, truncated, failedCount, ...(needsRetry ? { needsRetry: true } : {}) });
+  const failed = (task: RecoveryPage, key: string) => {
+    if (!cursor!.failed.some(item => item.chatId === task.chatId && item.pageOffset === task.pageOffset)) cursor!.failed.push(task);
+    if (!cursor!.failedKeys.includes(key)) cursor!.failedKeys.push(key);
   };
-}
-type RecoveryStep = {
-  complete: boolean;
-  cursor: string | null;
-  processed: number;
-  created: number;
-  truncated: boolean;
-};
-/**
- * Known gap: every conversation with activity since the line went offline (10 minutes of overlap),
- * the seller's and new ones. Messages are recorded as if they had arrived live: unread, and a new
- * contact gets its "Atendimento WhatsApp" opportunity marked as received while disconnected.
- * Conversations without activity in the gap are never read, so old conversations are not imported.
- */
-async function recoverWindow(
-  config: WahaConfig,
-  due: Row,
-  deadline: number,
-  me: any,
-): Promise<RecoveryStep | "unavailable"> {
-  const since = Number(due["window_start"]);
-  let cursor: { chats: string[]; index: number; offset: number; truncated: boolean } | null = null;
-  try {
-    cursor = due["cursor"] ? JSON.parse(String(due["cursor"])) : null;
-  } catch {
-    cursor = null;
-  }
-  if (!cursor || !Array.isArray(cursor.chats)) {
-    // First step of a pass: conversations with activity since the line went offline, newest first.
-    const chats: string[] = [];
-    let truncated = false;
-    try {
-      for (let offset = 0; ; offset += 50) {
-        if (offset >= RECOVERY_MAX_CHATS) {
-          truncated = true;
-          break;
-        }
-        const response = (await (
-          await api(
-            config,
-            `/api/${encodeURIComponent(config.session)}/chats?limit=50&offset=${offset}&sortBy=conversationTimestamp&sortOrder=desc`,
-          )
-        ).json()) as any;
-        const page = Array.isArray(response) ? response : response?.chats || response?.data || [];
-        if (!Array.isArray(page)) break;
-        let older = false;
-        for (const chat of page.slice(0, 50)) {
-          const at = Number(chat?.conversationTimestamp);
-          if (Number.isFinite(at) && at > 0 && at < since) {
-            older = true;
-            break;
-          }
-          // The NOWEB store lists individual chats as `...@s.whatsapp.net` (or `@lid`).
-          const id = txt(typeof chat?.id === "string" ? chat.id : chat?.id?._serialized, 200).replace(
-            /@s\.whatsapp\.net$/,
-            "@c.us",
-          );
-          if (/^\d+@(c\.us|lid)$/.test(id) && !chats.includes(id)) chats.push(id);
-        }
-        if (older || page.length < 50) break;
-      }
-    } catch {
-      return "unavailable";
-    }
-    cursor = { chats, index: 0, offset: 0, truncated };
-  }
-  const identities = new Map<string, Awaited<ReturnType<typeof resolveIdentity>>>();
-  let processed = 0,
-    created = 0,
-    truncated = cursor.truncated === true;
-  const pause = (newChat: boolean): RecoveryStep => ({
-    complete: false,
-    cursor: JSON.stringify(cursor),
-    processed,
-    created: created + Number(newChat),
-    truncated,
-  });
-  while (cursor.index < cursor.chats.length) {
-    if (Date.now() > deadline) return pause(false);
-    const chatId = cursor.chats[cursor.index]!;
-    let list: any[] = [];
-    try {
-      const result = await windowMessages(config, chatId, since);
-      list = result.messages;
-      if (result.truncated) truncated = cursor.truncated = true;
-    } catch {
-      // One conversation failing (e.g. removed chat) never blocks the others.
-    }
-    let newChat = false;
-    for (; cursor.offset < list.length; cursor.offset++) {
-      if (Date.now() > deadline) return pause(newChat);
+  while (cursor.index < cursor.tasks.length) {
+    if (Date.now() > deadline) return result(false);
+    const task = cursor.tasks[cursor.index]!;
+    if (!cursor.page) {
       try {
-        const result = await processMessage(
-          config,
-          { ...list[cursor.offset], chatId },
-          false,
-          identities,
-          me,
-          { recovered: true },
-        );
-        if (result && !result.duplicate) processed++;
-        if (result?.created) newChat = true;
-      } catch {
-        // E.g. a file WhatsApp no longer serves: the message itself is kept; the next pass retries it.
-      }
+        const page = await windowMessages(config, task.chatId, task.since, task.pageOffset, cursor.until);
+        cursor.page = encrypt(page.messages); cursor.pageMore = page.truncated; cursor.subindex = 0;
+      } catch { failed(task, `${task.chatId}:${task.pageOffset}:fetch`); cursor.index++; continue; }
     }
-    if (newChat) created++;
-    cursor.index++;
-    cursor.offset = 0;
-  }
-  return { complete: true, cursor: null, processed, created, truncated };
-}
-/** Unknown gap (first connection of a number): only the seller's existing conversations, as history. */
-async function recoverPortfolio(
-  config: WahaConfig,
-  due: Row,
-  deadline: number,
-  me: any,
-): Promise<RecoveryStep> {
-  const db = ensureWahaSchema();
-  const chats = db
-    .prepare(
-      "SELECT id,chat_id,contact_id FROM crm_whatsapp_bindings WHERE session=? AND id>? ORDER BY id LIMIT 25",
-    )
-    .all(config.session, String(due["cursor"] || "")) as Row[];
-  const identities = new Map<string, Awaited<ReturnType<typeof resolveIdentity>>>();
-  let cursor = due["cursor"] ? String(due["cursor"]) : "",
-    processed = 0;
-  for (const chat of chats) {
-    if (Date.now() > deadline)
-      return { complete: false, cursor, processed, created: 0, truncated: false };
-    const last = db
-      .prepare(
-        "SELECT max(sent_at) at FROM crm_messages WHERE provider='waha' AND account=? AND contact_id=?",
-      )
-      .get(config.session, chat["contact_id"])?.["at"];
-    const since = last
-      ? Math.floor(new Date(String(last)).getTime() / 1000) - RECOVERY_OVERLAP_S
-      : 0;
-    if (since > 0) {
-      let list: any[] = [];
+    const list = decrypt<any[]>(cursor.page);
+    for (; cursor.subindex < list.length; cursor.subindex++) {
+      if (Date.now() > deadline) return result(false);
+      const message = list[cursor.subindex];
       try {
-        list = (await windowMessages(config, String(chat["chat_id"]), since)).messages;
-      } catch {
-        // One conversation failing (e.g. removed chat) never blocks the others.
-      }
-      for (const message of list) {
-        try {
-          const result = await processMessage(
-            config,
-            { ...message, chatId: String(chat["chat_id"]) },
-            true,
-            identities,
-            me,
-          );
-          if (result && !result.duplicate) processed++;
-        } catch {
-          // One message (e.g. an unavailable file) never blocks the others.
-        }
-      }
+        const stored = await processMessage(config, { ...message, chatId: task.chatId }, historical, identities, me, { recovered: !historical });
+        if (stored && !stored.duplicate) processed++;
+        if (stored?.created) created++;
+      } catch { failed(task, `${task.chatId}:${task.pageOffset}:${canonicalMessageId(message?.id) || cursor.subindex}`); }
     }
-    cursor = String(chat["id"]);
+    if (cursor.pageMore) cursor.deferred.push({ ...task, pageOffset: task.pageOffset + RECOVERY_MAX_MESSAGES });
+    cursor.page = null; cursor.pageMore = false; cursor.subindex = 0; cursor.index++;
   }
-  return { complete: chats.length < 25, cursor, processed, created: 0, truncated: false };
+  if (cursor.deferred.length || !cursor.catalogDone) {
+    cursor.tasks = cursor.deferred; cursor.deferred = []; cursor.index = 0; cursor.loaded = false;
+    return result(false, true);
+  }
+  if (cursor.failed.length) {
+    const count = cursor.failedKeys.length;
+    cursor.tasks = cursor.failed; cursor.failed = []; cursor.failedKeys = []; cursor.index = 0; cursor.loaded = true;
+    return result(false, false, true, count);
+  }
+  return result(true);
 }
 /**
  * One step of the catch-up after a reconnection, run after live events and in small steps. Two
  * passes (2 and 15 minutes after the reconnection): WhatsApp may deliver the history of a newly
  * linked phone a few minutes later. Message ids keep every pass free of duplicates.
  */
-async function runRecoveryStep(budgetMs = 10_000) {
+async function runRecoveryStep(budgetMs = 10_000): Promise<void> {
   const db = ensureWahaSchema();
   const due = db
     .prepare(
@@ -2167,16 +2144,19 @@ async function runRecoveryStep(budgetMs = 10_000) {
     .get(Date.now());
   if (!due) return;
   const session = String(due["session"]);
-  const finish = (state: string, error: string | null = null) =>
+  const finish = (state: string, error: string | null = null): void => {
     db
       .prepare("UPDATE crm_waha_recovery SET state=?,error_code=?,updated_at=? WHERE session=?")
       .run(state, error, now(), session);
-  const later = (delay: number, error: string | null = null) =>
+  };
+  const later = (delay: number, error: string | null = null): void => {
+    const attempts = Number(due["failure_attempts"] || 0) + 1;
     db
       .prepare(
-        "UPDATE crm_waha_recovery SET available_at=?,error_code=?,updated_at=? WHERE session=?",
+        "UPDATE crm_waha_recovery SET state=?,available_at=?,error_code=?,failure_attempts=?,failed_count=?,has_more=1,updated_at=? WHERE session=?",
       )
-      .run(Date.now() + delay, error, now(), session);
+      .run(attempts >= 5 ? "error" : "pending", Date.now() + delay, error, attempts, Math.max(1, Number(due["failed_count"] || 0)), now(), session);
+  };
   const { config: settings } = configuration();
   const line = settings.enabled ? activeLineBySession(session) : null;
   if (!line) return finish("cancelled");
@@ -2190,31 +2170,40 @@ async function runRecoveryStep(budgetMs = 10_000) {
   // Offline again before the catch-up: the window is kept and merged into the next reconnection.
   if (info?.status !== "WORKING") return finish("idle", "not_connected");
   if (!numberMatches(config, info)) return finish("cancelled", "number_mismatch");
+  // Earlier homologation builds scheduled unknown-gap history on first connection. Do not resume
+  // those checkpoints implicitly; historical imports remain explicit, per selected conversation.
+  if (due["window_start"] === null || due["window_start"] === undefined)
+    return finish("cancelled", "unknown_window");
+  if (due["mode"] === "reconcile" && Number(due["passes"]) > 0 && !due["cursor"]) {
+    due["window_end"] = Math.floor(Date.now() / 1000);
+    db.prepare("UPDATE crm_waha_recovery SET window_end=? WHERE session=?").run(due["window_end"], session);
+  }
   const deadline = Date.now() + budgetMs;
-  const step =
-    due["window_start"] === null || due["window_start"] === undefined
-      ? await recoverPortfolio(config, due, deadline, info.me)
-      : await recoverWindow(config, due, deadline, info.me);
+  const step = await recoverWindow(config, due, deadline, info.me);
   if (step === "unavailable") return later(60_000, "waha_unavailable");
+  if (step.truncated || step.needsRetry) {
+    db.prepare("UPDATE crm_waha_recovery SET state='partial',cursor=?,processed=processed+?,new_chats=new_chats+?,failed_count=?,has_more=1,error_code=?,failure_attempts=0,updated_at=? WHERE session=?").run(step.cursor, step.processed, step.created, step.failedCount, step.truncated ? "limit" : "recovery_failed", now(), session);
+    return;
+  }
   if (!step.complete) {
     db.prepare(
-      "UPDATE crm_waha_recovery SET cursor=?,processed=processed+?,new_chats=new_chats+?,available_at=?,updated_at=? WHERE session=?",
-    ).run(step.cursor, step.processed, step.created, Date.now(), now(), session);
+      "UPDATE crm_waha_recovery SET cursor=?,processed=processed+?,new_chats=new_chats+?,failed_count=?,has_more=0,failure_attempts=0,available_at=?,updated_at=? WHERE session=?",
+    ).run(step.cursor, step.processed, step.created, step.failedCount, Date.now(), now(), session);
     return;
   }
   const passes = Number(due["passes"]) + 1;
   db.prepare(
-    "UPDATE crm_waha_recovery SET state=?,passes=?,cursor=NULL,processed=processed+?,new_chats=new_chats+?,available_at=?,updated_at=?,error_code=? WHERE session=?",
+    "UPDATE crm_waha_recovery SET state=?,passes=?,cursor=NULL,processed=processed+?,new_chats=new_chats+?,available_at=?,updated_at=?,error_code=NULL,has_more=0,failed_count=0,failure_attempts=0 WHERE session=?",
   ).run(
     passes >= 2 ? "done" : "pending",
     passes,
     step.processed,
     step.created,
-    Date.now() + RECOVERY_SECOND_PASS_MS,
+    Date.now() + (due["mode"] === "reconcile" ? RECONCILE_INTERVAL_MS : RECOVERY_SECOND_PASS_MS),
     now(),
-    step.truncated ? "limit" : null,
     session,
   );
+  if (passes >= 2 && due["window_start"] != null) db.prepare("UPDATE crm_waha_watermarks SET covered_until=max(covered_until,?) WHERE session=?").run(Number(due["window_end"]) || Math.floor(Date.now()/1000), session);
   if (step.processed || step.created)
     audit(null, "crm:waha:recovery", line.id, {
       processed: step.processed,
@@ -2268,11 +2257,24 @@ export async function drainWahaEvents() {
         );
       }
     }
+    await reconcileWorkingLines().catch(() => {});
     // Catch-up work never delays live events: it runs after them, in small steps.
     if (events.length < 10) await runRecoveryStep().catch(() => {});
   } finally {
     draining = false;
   }
+}
+/** Continues a capped scan or retries only the failed pages of this line, never sends a message. */
+export async function retryWahaRecovery(actor: SiteUser, input: { lineId?: string | undefined } = {}) {
+  const user = commercial(actor), { config: settings } = configuration();
+  const line = resolveLine(user, input.lineId), config = withLine(settings, line);
+  await requireReady(user, config);
+  const row = recoveryOf(line.session);
+  if (!row || (!['partial','error'].includes(String(row['state'])) && !row['error_code'])) throw new Error("Não há conferência parcial ou com falha para continuar nesta linha.");
+  ensureWahaSchema().prepare("UPDATE crm_waha_recovery SET state='pending',available_at=?,error_code=NULL,failure_attempts=0,failed_count=0,has_more=0,updated_at=? WHERE session=?").run(Date.now(), now(), line.session);
+  audit(user.id, "crm:waha:recovery:retry", line.id);
+  if (process.env["CRM_DISABLE_WORKER"] !== "1") void drainWahaEvents().catch(() => {});
+  return { ok: true as const, recovery: recoverySummary(recoveryOf(line.session)) };
 }
 export function startWahaWorker() {
   if (worker || process.env["CRM_DISABLE_WORKER"] === "1") return;
@@ -2506,4 +2508,384 @@ async function syncWahaHistoryPage(
     message:
       "Lote sincronizado com continuidade salva. O histórico disponibilizado pelo conector pode estar incompleto.",
   };
+}
+
+const CATALOG_TOKEN_MS = 15 * 60_000;
+const CATALOG_SCAN_LIMIT = 200;
+const catalogFold = (value: unknown) =>
+  txt(value, 500)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+const catalogName = (value: unknown) =>
+  typeof value === "string" ? txt(value, 200).replace(/[\u0000-\u001f\u007f]/g, " ") : "";
+const catalogAddress = (value: unknown) => {
+  const id = txt(typeof value === "string" ? value : (value as any)?._serialized, 200).replace(
+    /@s\.whatsapp\.net$/,
+    "@c.us",
+  );
+  return /^\d{5,30}@(c\.us|lid)$/.test(id) ? id : null;
+};
+const catalogInputSchema = z
+  .object({
+    lineId: z.string().uuid().optional(),
+    search: z.string().trim().max(200).optional(),
+    before: z.string().max(2048).optional(),
+    limit: z.number().int().min(1).max(50).optional(),
+  })
+  .strict();
+const catalogImportSchema = z
+  .object({
+    lineId: z.string().uuid().optional(),
+    chatId: z.string().max(200),
+    selectionToken: z.string().min(1).max(4096),
+  })
+  .strict();
+function catalogToken<T extends z.ZodTypeAny>(token: string, schema: T): z.infer<T> {
+  try {
+    if (
+      !/^[A-Za-z0-9+/=]+$/.test(token) ||
+      Buffer.from(token, "base64").toString("base64") !== token
+    )
+      throw new Error();
+    return schema.parse(decrypt<unknown>(token));
+  } catch {
+    throw new Error(
+      "A seleção do WhatsApp expirou ou é inválida. Atualize a lista e escolha novamente.",
+    );
+  }
+}
+async function catalogContext(actor: SiteUser, lineId?: string | undefined) {
+  const user = commercial(actor),
+    { config: settings } = configuration();
+  // Catalog supervision must be deliberate even when the administrator also owns a line.
+  if (isAdmin(user) && !lineId && activeLines().length > 1)
+    throw new Error("Escolha a linha de WhatsApp da vendedora.");
+  const line = resolveLine(user, lineId),
+    config = withLine(settings, line);
+  await requireReady(user, config);
+  const info = await sessionState(config);
+  if (info.status !== "WORKING" || !numberMatches(config, info))
+    throw new Error("O WhatsApp mudou de conexão. Consulte o estado e tente novamente.");
+  return { user, config, line, me: info.me };
+}
+function catalogStillCurrent(config: WahaConfig, revision: number) {
+  const current = configuration().config,
+    line = lineById(config.lineId);
+  if (
+    !line ||
+    line.status !== "active" ||
+    line.revision !== revision ||
+    line.userId !== config.ownerId ||
+    line.session !== config.session ||
+    !samePhone(line.expectedPhone, config.expectedPhone) ||
+    !current.enabled ||
+    current.baseUrl !== config.baseUrl ||
+    current.apiKey !== config.apiKey
+  )
+    throw new Error("A configuração da linha mudou. Atualize a lista antes de continuar.");
+  requireConfigured(withLine(current, line));
+}
+async function catalogIdentity(config: WahaConfig, chatId: string, chat: any, refreshName = false) {
+  let number = chatId.endsWith("@c.us") ? phone(chatId.split("@")[0]) : "";
+  if (chatId.endsWith("@lid")) {
+    try {
+      const resolved = await (
+        await api(
+          config,
+          `/api/${encodeURIComponent(config.session)}/lids/${encodeURIComponent(chatId)}`,
+          { timeout: 3000 },
+        )
+      ).json();
+      // A LID is not a telephone. Only an explicit phone-address mapping is accepted.
+      if (/^\d{10,15}@(c\.us|s\.whatsapp\.net)$/.test(String(resolved?.pn || "")))
+        number = phone(String(resolved.pn).split("@")[0]);
+    } catch {
+      /* Unresolved identities remain visible but cannot be imported. */
+    }
+  }
+  if (!/^\d{12,15}$/.test(number)) number = "";
+  let name = catalogName(chat?.name || chat?.notifyName || chat?.verifiedName);
+  if (!name || refreshName) {
+    try {
+      const contact = await (
+        await api(
+          config,
+          `/api/contacts?session=${encodeURIComponent(config.session)}&contactId=${encodeURIComponent(chatId)}`,
+          { timeout: 3000 },
+        )
+      ).json();
+      name = catalogName(contact?.name || contact?.pushname || contact?.notify) || name;
+    } catch {
+      /* A phone-only conversation does not need a saved address-book name. */
+    }
+  }
+  return {
+    phone: number ? normalizeBrPhone(number) : null,
+    name: name || number || "Contato sem identificação",
+  };
+}
+function catalogExistingContact(config: WahaConfig, number: string, chatId: string) {
+  const variants = brPhoneVariants(number);
+  const db = ensureCrmSchema(), rows = db
+    .prepare(
+      `SELECT id FROM crm_contacts WHERE owner_id=? AND phone IN (${variants.map(() => "?").join(",")}) LIMIT 2`,
+    )
+    .all(config.ownerId, ...variants);
+  const conflict = "Este atendimento tem uma identificação pendente ou conflitante no CRM. Revise antes de importar.";
+  if (rows.length > 1) return { contactId: null, reason: "Há cadastros com o mesmo telefone nesta carteira. Revise antes de importar." };
+  const tables = Number(db.prepare("SELECT count(*) n FROM sqlite_master WHERE type='table' AND name IN ('crm_whatsapp_bindings','crm_whatsapp_identities')").get()?.["n"]);
+  let boundId: string | null = null;
+  if (tables) {
+    if (tables !== 2) return { contactId: null, reason: conflict };
+    const addresses = [...new Set([chatId, ...variants.map(value => `${value}@c.us`)])];
+    const bindings = db.prepare(`SELECT DISTINCT b.contact_id,b.owner_id,b.triage_reason,c.phone FROM crm_whatsapp_bindings b LEFT JOIN crm_whatsapp_identities i ON i.binding_id=b.id AND i.session=b.session JOIN crm_contacts c ON c.id=b.contact_id WHERE b.session=? AND (b.chat_id IN (${addresses.map(() => "?").join(",")}) OR i.address IN (${addresses.map(() => "?").join(",")}))`).all(config.session, ...addresses, ...addresses);
+    if (new Set(bindings.map(row => String(row["contact_id"]))).size > 1 || bindings.some(row => row["owner_id"] !== config.ownerId || ["unresolved_identity", "identity_conflict"].includes(String(row["triage_reason"])) || !row["phone"] || !samePhone(row["phone"],number)))
+      return { contactId: null, reason: conflict };
+    if (bindings.length) boundId = String(bindings[0]!["contact_id"]);
+    if (boundId && rows.length && boundId !== rows[0]!["id"]) return { contactId: null, reason: conflict };
+  }
+  return { contactId: boundId || (rows.length === 1 ? String(rows[0]!["id"]) : null), reason: null };
+}
+function catalogMatches(item: Pick<WahaCatalogContact, "name" | "phone">, search: string) {
+  if (!search) return true;
+  const folded = catalogFold(search),
+    numeric = /^[+\d\s().-]+$/.test(search) ? digits(search) : "";
+  if (numeric)
+    return (
+      brPhoneVariants(item.phone).some((number) => number.includes(numeric)) ||
+      (numeric.length >= 10 && samePhone(phone(numeric), item.phone))
+    );
+  const haystack = catalogFold(`${item.name} ${item.phone || ""}`);
+  return folded
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((term) => haystack.includes(term));
+}
+/** Read-only catalog: at most 200 provider rows per call; never imports contacts, messages or leads. */
+export async function readWahaContactCatalog(
+  actor: SiteUser,
+  raw: WahaContactCatalogInput = {},
+): Promise<WahaContactCatalogPage> {
+  const input = catalogInputSchema.parse(raw),
+    { user, config, line, me } = await catalogContext(actor, input.lineId);
+  const search = txt(input.search, 200),
+    limit = input.limit ?? 20;
+  const context = {
+    actorId: user.id,
+    lineId: config.lineId,
+    session: config.session,
+    search: catalogFold(search),
+    limit,
+  };
+  let offset = 0;
+  if (input.before) {
+    const cursor = catalogToken(
+      input.before,
+      z
+        .object({
+          purpose: z.literal("waha-catalog-page"),
+          actorId: z.string(),
+          lineId: z.string(),
+          session: z.string(),
+          search: z.string(),
+          limit: z.number(),
+          offset: z.number().int().min(0).max(10_000_000),
+          expires: z.number(),
+        })
+        .strict(),
+    );
+    if (
+      cursor.expires < Date.now() ||
+      Object.entries(context).some(([key, value]) => cursor[key as keyof typeof cursor] !== value)
+    )
+      throw new Error("A busca do WhatsApp mudou ou expirou. Atualize a lista.");
+    offset = cursor.offset;
+  }
+  const items: WahaCatalogContact[] = [],
+    seen = new Set<string>(),
+    started = Date.now();
+  let scanned = 0,
+    hasMore = true;
+  while (scanned < CATALOG_SCAN_LIMIT && items.length < limit && Date.now() - started < 10_000) {
+    const result = await (
+      await api(
+        config,
+        `/api/${encodeURIComponent(config.session)}/chats?limit=50&offset=${offset}&sortBy=id&sortOrder=asc&merge=true`,
+      )
+    ).json();
+    const rows = Array.isArray(result) ? result : result?.chats || result?.data;
+    if (!Array.isArray(rows) || rows.length > 50)
+      throw new Error("O WAHA retornou uma lista de conversas inválida.");
+    if (!rows.length) {
+      hasMore = false;
+      break;
+    }
+    let consumed = 0;
+    for (
+      let index = 0;
+      index < rows.length && scanned < CATALOG_SCAN_LIMIT && items.length < limit;
+    ) {
+      if (Date.now() - started >= 10_000) break;
+      const chunk = rows.slice(index, index + Math.min(5, CATALOG_SCAN_LIMIT - scanned));
+      const candidates = await Promise.all(
+        chunk.map(async (chat) => {
+          const chatId = catalogAddress(chat?.id);
+          if (!chatId || isOwnAddress(chatId, me)) return null;
+          const identity = await catalogIdentity(config, chatId, chat);
+          if (
+            identity.phone &&
+            (samePhone(identity.phone, config.expectedPhone) ||
+              isProtectedPhone(config, identity.phone))
+          )
+            return null;
+          const known = identity.phone
+            ? catalogExistingContact(config, identity.phone, chatId)
+            : { contactId: null, reason: null };
+          const unavailableReason = !identity.phone
+            ? "O WhatsApp ainda não confirmou o telefone deste contato."
+            : known.reason;
+          const timestamp = Number(chat?.conversationTimestamp ?? chat?.lastMessage?.timestamp);
+          const lastActivityAt =
+            Number.isFinite(timestamp) && timestamp > 0 && timestamp < 253402300800
+              ? new Date(timestamp * 1000).toISOString()
+              : null;
+          return {
+            chatId,
+            name: identity.name,
+            phone: identity.phone,
+            contactId: known.contactId,
+            canImport: !unavailableReason,
+            unavailableReason,
+            lastActivityAt,
+          };
+        }),
+      );
+      for (const candidate of candidates) {
+        consumed++;
+        scanned++;
+        index++;
+        if (!candidate || !catalogMatches(candidate, search)) continue;
+        const identityKey = candidate.phone || candidate.chatId;
+        if (seen.has(identityKey)) continue;
+        seen.add(identityKey);
+        items.push({
+          ...candidate,
+          selectionToken: candidate.canImport
+            ? encrypt({
+                purpose: "waha-catalog-import",
+                actorId: user.id,
+                lineId: config.lineId,
+                session: config.session,
+                chatId: candidate.chatId,
+                phone: candidate.phone,
+                expires: Date.now() + CATALOG_TOKEN_MS,
+              })
+            : null,
+        });
+        if (items.length >= limit) break;
+      }
+    }
+    offset += consumed;
+    if (consumed === rows.length && rows.length < 50) {
+      hasMore = false;
+      break;
+    }
+    if (!consumed) break;
+  }
+  await requireReady(user, config);
+  commercial(user);
+  catalogStillCurrent(config, line.revision);
+  return {
+    lineId: config.lineId,
+    ownerName: userSummary(config.ownerId).name,
+    items,
+    hasMore,
+    nextCursor: hasMore
+      ? encrypt({
+          purpose: "waha-catalog-page",
+          ...context,
+          offset,
+          expires: Date.now() + CATALOG_TOKEN_MS,
+        })
+      : null,
+    scanned,
+    searchScope: "loaded-window",
+    notice:
+      "A lista consulta as conversas disponíveis no WhatsApp conectado, em lotes. Carregue mais para continuar a busca. Trazer um contato não importa mensagens antigas nem cria oportunidade.",
+  };
+}
+/** Explicit contact-only import. A catalog selection cannot be forged or reused across portfolios. */
+export async function importWahaContact(actor: SiteUser, raw: WahaContactImportInput) {
+  const input = catalogImportSchema.parse(raw),
+    { user, config, line, me } = await catalogContext(actor, input.lineId);
+  const chatId = catalogAddress(input.chatId);
+  if (!chatId || chatId !== input.chatId)
+    throw new Error("Escolha uma conversa individual válida da lista.");
+  const proof = catalogToken(
+    input.selectionToken,
+    z
+      .object({
+        purpose: z.literal("waha-catalog-import"),
+        actorId: z.string(),
+        lineId: z.string(),
+        session: z.string(),
+        chatId: z.string(),
+        phone: z.string(),
+        expires: z.number(),
+      })
+      .strict(),
+  );
+  if (
+    proof.actorId !== user.id ||
+    proof.lineId !== config.lineId ||
+    proof.session !== config.session ||
+    proof.chatId !== chatId ||
+    proof.expires < Date.now()
+  )
+    throw new Error("A seleção do WhatsApp mudou ou expirou. Atualize a lista.");
+  // Revalidate membership against the provider on the explicit import, not merely its phone syntax.
+  const result = await (
+    await api(
+      config,
+      `/api/${encodeURIComponent(config.session)}/chats/overview?limit=1&offset=0&ids=${encodeURIComponent(chatId)}&merge=true`,
+    )
+  ).json();
+  const rows = Array.isArray(result) ? result : result?.chats || result?.data;
+  const chat = Array.isArray(rows)
+    ? rows.find((item) => catalogAddress(item?.id) === chatId)
+    : null;
+  if (!chat || isOwnAddress(chatId, me))
+    throw new Error("Esta conversa não está mais disponível no WhatsApp. Atualize a lista.");
+  const identity = await catalogIdentity(config, chatId, chat, true);
+  if (
+    !identity.phone ||
+    !samePhone(identity.phone, proof.phone) ||
+    samePhone(identity.phone, config.expectedPhone) ||
+    isProtectedPhone(config, identity.phone)
+  )
+    throw new Error("O telefone desta conversa não foi confirmado ou mudou. Atualize a lista.");
+  // Administrative changes while provider calls awaited must not import into a stale/disabled line.
+  await requireReady(user, config);
+  commercial(user);
+  catalogStillCurrent(config, line.revision);
+  const known = catalogExistingContact(config, identity.phone, chatId);
+  if (known.reason) throw new Error(known.reason);
+  if (known.contactId) return { contactId: known.contactId, created: false };
+  return atomic(() => {
+    // createContact deduplicates phone aliases again inside the transaction; no messages or fake events.
+    const configuredUnit = ensureWahaSchema()
+      .prepare("SELECT unit_id FROM lead_distribution_consultants WHERE user_id=? AND enabled=1")
+      .get(config.ownerId);
+    const contact = createContact(user, {
+      name: identity.name,
+      phone: identity.phone!,
+      email: "",
+      city: "",
+      ownerId: config.ownerId,
+      unitId: configuredUnit?.["unit_id"] ? String(configuredUnit["unit_id"]) : null,
+    });
+    audit(user.id, "crm:waha:contact:import", contact.id, { lineId: config.lineId });
+    return { contactId: contact.id, created: true };
+  });
 }
