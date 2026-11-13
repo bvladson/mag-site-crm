@@ -1,6 +1,7 @@
 import { getDb, transaction, audit, readLead } from "./local-db.server.ts";
 import { requireRoles, type SiteUser } from "./local-auth-core.server.ts";
 import { listUnitsPublic, validateUnitId } from "./units.server.ts";
+import { requireSiteLead, siteLeadScope } from "./site-leads.server.ts";
 
 type Row = Record<string, any>;
 export type AssignmentMode = "manual" | "unidade" | "rodizio";
@@ -212,11 +213,13 @@ export function readAssignedLeads(
 ) {
   guard(actor);
   assignmentsSchema();
+  // Mesma regra de carteira do CRM: o que é meu + fila livre; nunca o de outro vendedor.
+  const scope = siteLeadScope(actor, "quote", "q");
   const rows = getDb()
     .prepare(
-      `SELECT q.*,a.owner_id,a.unit_id,COALESCE(a.revision,0) assignment_revision,COALESCE(NULLIF(u.display_name,''),u.email) owner_name,(SELECT SUM(qty) FROM quote_request_items i WHERE i.quote_request_id=q.id) item_count,(SELECT count(*) FROM internal_quotes n WHERE n.source_request_id=q.id) negotiation_count FROM quote_requests q LEFT JOIN lead_assignments a ON a.lead_id=q.id LEFT JOIN users u ON u.id=a.owner_id ORDER BY q.created_at DESC LIMIT 500`,
+      `SELECT q.*,a.owner_id,a.unit_id,COALESCE(a.revision,0) assignment_revision,COALESCE(NULLIF(u.display_name,''),u.email) owner_name,(SELECT SUM(qty) FROM quote_request_items i WHERE i.quote_request_id=q.id) item_count,(SELECT count(*) FROM internal_quotes n WHERE n.source_request_id=q.id) negotiation_count FROM quote_requests q LEFT JOIN lead_assignments a ON a.lead_id=q.id LEFT JOIN users u ON u.id=a.owner_id WHERE ${scope.clause} ORDER BY q.created_at DESC LIMIT 500`,
     )
-    .all() as Row[];
+    .all(...scope.params) as Row[];
   const units = new Map(listUnitsPublic().map((u) => [u["id"], u.name]));
   const term = (filter.search || "").toLowerCase();
   return rows
@@ -252,6 +255,7 @@ export function readAssignedLeads(
 export function readLeadAssignment(actor: SiteUser, leadId: string) {
   guard(actor);
   readLead("quote_requests", leadId);
+  requireSiteLead(actor, "quote", leadId);
   const assignment = leadAssignment(leadId);
   const owner = assignment.ownerId
     ? getDb().prepare("SELECT email,display_name FROM users WHERE id=?").get(assignment.ownerId)

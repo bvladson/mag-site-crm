@@ -24,7 +24,6 @@ async function guard(allowed?: Role[]) {
 }
 const like = (s: string) => `%${s.trim().replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 const field = (name: string) => `json_extract(data,'$.${name}')`;
-const matchAny = (names: string[]) => `(${names.map((n) => `${n.startsWith("protocolo") ? n : field(n)} LIKE ? ESCAPE '\\'`).join(" OR ")})`;
 /** Datas do filtro são dias de Fortaleza (UTC−3, sem horário de verão). */
 const dayStart = (day: string) => new Date(`${day}T00:00:00-03:00`).toISOString();
 const dayEnd = (day: string) => new Date(new Date(`${day}T00:00:00-03:00`).getTime() + 86400000).toISOString();
@@ -50,10 +49,9 @@ export const getDashboard = createServerFn({ method: "GET" }).handler(async () =
     lastApps?: { id: string; created_at: string; nome: string; job_title: string | null; area_interesse: string | null; status: string }[];
   } = { roles: user.roles };
   if (can(COM)) {
-    out.quotesNew = count("SELECT count(*) AS n FROM quote_requests WHERE status='novo'");
-    out.contactsNew = count("SELECT count(*) AS n FROM contact_requests WHERE status='novo'");
-    out.lastQuotes = latest("quote_requests").map((r) => ({ id: r["id"], created_at: r["created_at"], nome: r["nome"], empresa: r["empresa"] ?? null, status: r["status"] }));
-    out.lastContacts = latest("contact_requests").map((r) => ({ id: r["id"], created_at: r["created_at"], nome: r["nome"], assunto: r["assunto"], status: r["status"] }));
+    // Mesma regra de carteira do CRM: o vendedor só vê o que é seu e a fila livre (site-leads.server).
+    const { siteLeadsDashboard } = await import("./site-leads.server");
+    Object.assign(out, siteLeadsDashboard(user));
   }
   if (can(DHO)) {
     out.appsNew = count(`SELECT count(*) AS n FROM job_applications WHERE status='novo' AND ${field("job_slug")} IS NOT NULL`);
@@ -65,32 +63,21 @@ export const getDashboard = createServerFn({ method: "GET" }).handler(async () =
 
 const listFilter = z.object({ status: z.string().max(40).optional(), q: z.string().max(100).optional() });
 
-// ---------- Orçamentos ----------
+// ---------- Orçamentos e contatos do site (carteira conferida em site-leads.server) ----------
 export const listQuotes = createServerFn({ method: "GET" })
   .inputValidator((d: unknown) => listFilter.parse(d))
   .handler(async ({ data }) => {
-    await guard(COM);
-    const { getDb, decodeLead } = await import("./local-db.server");
-    const where: string[] = []; const params: string[] = [];
-    if (data.status) { where.push("status=?"); params.push(data.status); }
-    if (data.q?.trim()) { where.push(matchAny(["nome", "empresa", "whatsapp", "email", "protocolo"])); params.push(...Array(4).fill(like(data.q)), like(data.q.toUpperCase())); }
-    const rows = getDb().prepare(`SELECT q.*, (SELECT COALESCE(SUM(qty),0) FROM quote_request_items i WHERE i.quote_request_id=q.id) AS itemCount
-      FROM quote_requests q ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC LIMIT 300`).all(...params);
-    return rows.map(decodeLead).map((r) => ({
-      id: r["id"] as string, protocolo: r["protocolo"] as string, created_at: r["created_at"] as string, nome: r["nome"] as string,
-      empresa: (r["empresa"] ?? null) as string | null, cidade: r["cidade"] as string, estado: r["estado"] as string,
-      origem: (r["origem"] ?? null) as string | null, status: r["status"] as string, itemCount: Number(r["itemCount"]),
-    }));
+    const user = await guard(COM);
+    const { listSiteQuotes } = await import("./site-leads.server");
+    return listSiteQuotes(user, data);
   });
 
 export const getQuote = createServerFn({ method: "GET" })
   .inputValidator((d: unknown) => z.object({ id: z.string().uuid() }).parse(d))
   .handler(async ({ data }) => {
-    await guard(COM);
-    const { getDb, readLead } = await import("./local-db.server");
-    const row = readLead("quote_requests", data.id);
-    row["quote_request_items"] = getDb().prepare("SELECT id,slug,sku,name,qty FROM quote_request_items WHERE quote_request_id=? ORDER BY rowid").all(data.id);
-    return row as Row;
+    const user = await guard(COM);
+    const { readSiteQuote } = await import("./site-leads.server");
+    return readSiteQuote(user, data.id) as Row;
   });
 
 const updateSchema = (statuses: readonly string[]) =>
@@ -100,41 +87,32 @@ export const updateQuote = createServerFn({ method: "POST" })
   .inputValidator((d: unknown) => updateSchema(QUOTE_STATUS).parse(d))
   .handler(async ({ data }) => {
     const user = await guard(COM);
-    const { updateLead } = await import("./local-db.server");
-    return updateLead("quote_requests", data.id, data.status, data.internal_notes ?? null, user.id);
+    const { updateSiteLead } = await import("./site-leads.server");
+    return updateSiteLead(user, "quote", data);
   });
 
-// ---------- Contatos ----------
 export const listContacts = createServerFn({ method: "GET" })
   .inputValidator((d: unknown) => listFilter.parse(d))
   .handler(async ({ data }) => {
-    await guard(COM);
-    const { getDb, decodeLead } = await import("./local-db.server");
-    const where: string[] = []; const params: string[] = [];
-    if (data.status) { where.push("status=?"); params.push(data.status); }
-    if (data.q?.trim()) { where.push(matchAny(["nome", "empresa", "email", "whatsapp", "protocolo"])); params.push(...Array(4).fill(like(data.q)), like(data.q.toUpperCase())); }
-    const rows = getDb().prepare(`SELECT * FROM contact_requests ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC LIMIT 300`).all(...params);
-    return rows.map(decodeLead).map((r) => ({
-      id: r["id"] as string, protocolo: r["protocolo"] as string, created_at: r["created_at"] as string, nome: r["nome"] as string,
-      empresa: (r["empresa"] ?? null) as string | null, assunto: r["assunto"] as string, whatsapp: r["whatsapp"] as string,
-      email: r["email"] as string, status: r["status"] as string,
-    }));
+    const user = await guard(COM);
+    const { listSiteContacts } = await import("./site-leads.server");
+    return listSiteContacts(user, data);
   });
 
 export const getContact = createServerFn({ method: "GET" })
   .inputValidator((d: unknown) => z.object({ id: z.string().uuid() }).parse(d))
   .handler(async ({ data }) => {
-    await guard(COM);
-    const { readLead } = await import("./local-db.server");
-    return readLead("contact_requests", data.id) as Row;
+    const user = await guard(COM);
+    const { readSiteContact } = await import("./site-leads.server");
+    return readSiteContact(user, data.id) as Row;
   });
 
 export const updateContact = createServerFn({ method: "POST" })
   .inputValidator((d: unknown) => updateSchema(CONTACT_STATUS).parse(d))
   .handler(async ({ data }) => {
     const user = await guard(COM);
-    const { updateLead } = await import("./local-db.server");
-    return updateLead("contact_requests", data.id, data.status, data.internal_notes ?? null, user.id);
+    const { updateSiteLead } = await import("./site-leads.server");
+    return updateSiteLead(user, "contact", data);
   });
 
 // ---------- Candidaturas ----------

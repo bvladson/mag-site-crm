@@ -1,6 +1,7 @@
 import { getDb } from "./local-db.server.ts";
 import { requireActiveUser, type SiteUser } from "./local-auth-core.server.ts";
 import { PANEL_ROLES } from "./roles.ts";
+import { siteLeadScope } from "./site-leads.server.ts";
 
 export type PanelResult = { title: string; subtitle: string; kind: string; href: string };
 const like = (q: string) => `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
@@ -50,13 +51,15 @@ export function searchPanelCore(actor: SiteUser, query: string): PanelResult[] {
         href: `/interno/orcamentos-internos/${q["id"]}`,
       });
     for (const table of ["quote_requests", "contact_requests"] as const) {
+      // Mesma regra de carteira do CRM: o que é meu + fila livre; nunca o de outro vendedor.
+      const scope = siteLeadScope(user, table === "quote_requests" ? "quote" : "contact", "r");
       const rows = db
         .prepare(
-          `SELECT id,protocolo,status,json_extract(data,'$.nome') name FROM ${table}
-        WHERE (json_extract(data,'$.nome') LIKE ? ESCAPE '\\' OR json_extract(data,'$.empresa') LIKE ? ESCAPE '\\' OR protocolo LIKE ? ESCAPE '\\')
-        ORDER BY created_at DESC LIMIT 4`,
+          `SELECT r.id,r.protocolo,r.status,json_extract(r.data,'$.nome') name FROM ${table} r
+        WHERE (json_extract(r.data,'$.nome') LIKE ? ESCAPE '\\' OR json_extract(r.data,'$.empresa') LIKE ? ESCAPE '\\' OR r.protocolo LIKE ? ESCAPE '\\')
+        AND ${scope.clause} ORDER BY r.created_at DESC LIMIT 4`,
         )
-        .all(needle, needle, needle);
+        .all(needle, needle, needle, ...scope.params);
       for (const r of rows)
         out.push({
           title: String(r["name"] || r["protocolo"]),

@@ -111,12 +111,13 @@ test('revoking an administrator during a provider request blocks even an existin
 });
 test('a previously unresolved or conflicting WhatsApp binding never becomes a second contact on import',async()=>{
  const {ensureWhatsAppStoreSchema}=await import('../src/lib/crm-whatsapp-store.server.ts');ensureWhatsAppStoreSchema();
- const selected=(await catalog({search:'cliente 201'})).items[0];
+ // A busca do catálogo varre no máximo 200 conversas por vez (ver o teste anterior): seguir a continuação.
+ const selected=(await allPages('cliente 201'))[0];assert.equal(selected?.name,'Cliente 201');
  const unresolvedContact=crm.createContact(seller,{name:'Identificação antiga',phone:'',email:'',city:''});
  db.getDb().prepare('INSERT INTO crm_whatsapp_bindings(id,session,chat_id,owner_id,contact_id,phone,triage_reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)').run('catalog-pending-binding','catalog',selected.chatId,seller.id,unresolvedContact.id,'','unresolved_identity',new Date().toISOString(),new Date().toISOString());
  db.getDb().prepare('INSERT INTO crm_whatsapp_identities(session,address,binding_id) VALUES(?,?,?)').run('catalog',selected.chatId,'catalog-pending-binding');
  const before=stateCounts();
- const listed=(await catalog({search:'cliente 201'})).items[0];assert.equal(listed.canImport,false);assert.equal(listed.contactId,null);assert.match(listed.unavailableReason,/identificação pendente|conflitante/);
+ const listed=(await allPages('cliente 201'))[0];assert.equal(listed.canImport,false);assert.equal(listed.contactId,null);assert.match(listed.unavailableReason,/identificação pendente|conflitante/);
  await assert.rejects(waha.importWahaContact(seller,{chatId:selected.chatId,selectionToken:selected.selectionToken}),/identificação pendente|conflitante/);
  assert.deepEqual(stateCounts(),before);
 });
