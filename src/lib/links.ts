@@ -189,6 +189,41 @@ const presentationLabels = {
   wazeLabel: "Waze",
   campaignsLabel: "Campanhas em destaque",
 };
+
+/** Optional portal presentation extends saved documents without replacing their live content. */
+export function defaultLinkPortal() {
+  return {
+    headerTitle: "MAG em um toque",
+    city: "Fortaleza",
+    heroEyebrow: "",
+    heroTitle: "",
+    heroText: "",
+    heroCtaLabel: "Explorar",
+    showQuickActions: true,
+    showBottomNav: true,
+    showSearch: true,
+    mascotEnabled: true,
+    mascotName: "Mascote MAG",
+  };
+}
+
+export const linkPortalSchema = z
+  .object({
+    headerTitle: text(120).default("MAG em um toque"),
+    city: text(120).default("Fortaleza"),
+    heroEyebrow: text(120).default(""),
+    heroTitle: text(120).default(""),
+    heroText: text(320).default(""),
+    heroCtaLabel: text(120).default("Explorar"),
+    showQuickActions: z.boolean().default(true),
+    showBottomNav: z.boolean().default(true),
+    showSearch: z.boolean().default(true),
+    mascotEnabled: z.boolean().default(true),
+    mascotName: text(60).default("Mascote MAG"),
+  })
+  .strict();
+export type LinkPortal = z.infer<typeof linkPortalSchema>;
+
 export const linkPresentationSchema = z
   .object({
     slogan: text(120).default("Confortavelmente produtivo"),
@@ -207,6 +242,7 @@ export const linkPresentationSchema = z
       .nullable()
       .default(null),
     showShare: z.boolean().default(true),
+    portal: linkPortalSchema.default(defaultLinkPortal),
     labels: z
       .object({
         unitsEyebrow: text(120).default(presentationLabels.unitsEyebrow),
@@ -256,6 +292,7 @@ export function defaultLinkPresentation(): LinkPresentation {
     overlayStrength: "balanced",
     accentColor: null,
     showShare: true,
+    portal: defaultLinkPortal(),
     labels: { ...presentationLabels },
   };
 }
