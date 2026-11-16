@@ -16,6 +16,7 @@ import { ProductImage } from "@/components/site/ProductImage";
 import { formatPrice } from "@/components/site/ProductCard";
 import { Button } from "@/components/ui/button";
 import { usePublicSite } from "@/components/site/SiteContentProvider";
+import "@/components/site/EditorialPages.css";
 
 export const Route = createFileRoute("/orcamento")({
   head: () => ({
@@ -132,12 +133,12 @@ function QuotePage() {
     return (
       <div className="mx-auto max-w-lg px-4 py-20 text-center">
         <ClipboardList className="mx-auto size-10 text-muted-foreground" />
-        <h1 className="mt-4 text-4xl font-semibold">Sua lista está vazia</h1>
+        <h1 className="mt-4 text-4xl font-medium">Seu próximo ambiente<br />começa aqui.</h1>
         <p className="mt-2 text-muted-foreground">
-          Adicione produtos ao orçamento para solicitar uma cotação.
+          Escolha os móveis para sua lista ou converse com a MAG sobre um projeto completo.
         </p>
         <Button asChild size="lg" className="mt-6">
-          <Link to="/produtos">Explorar produtos</Link>
+          <Link to="/produtos">Explorar catálogo</Link>
         </Button>
       </div>
     );
@@ -146,11 +147,11 @@ function QuotePage() {
   const field =
     "h-11 w-full rounded-md border border-input bg-card px-3 outline-none focus:border-foreground/40";
   return (
-    <div className="mx-auto max-w-7xl px-4 py-8 lg:px-6 lg:py-12">
-      <h1 className="text-4xl font-semibold lg:text-5xl">Lista de orçamento</h1>
-      <div className="mt-8 grid gap-10 lg:grid-cols-[1.2fr_1fr]">
+    <div className="mag-quote-page editorial-container py-10 lg:py-16">
+      <p className="section-index"><span>MAG</span>Seu briefing de projeto</p><h1 className="display-title mt-8">Conte para a MAG<br />o que você precisa.</h1><p className="mt-6 max-w-lg text-muted-foreground">Reúna suas escolhas e conte sobre o ambiente. A equipe MAG segue a conversa com você.</p>
+      <div className="mt-12 grid gap-12 lg:grid-cols-[1.2fr_1fr] lg:gap-16">
         <div>
-          <ul className="divide-y rounded-md border bg-card">
+          <ul className="divide-y border-y bg-card">
             {rows.map(({ slug, qty, product }) => (
               <li
                 key={slug}
@@ -206,10 +207,10 @@ function QuotePage() {
         </div>
         <form
           onSubmit={submit}
-          className="relative space-y-3 rounded-md border bg-surface p-5 lg:p-6"
+          className="mag-editorial-form relative space-y-5 border-t pt-6 lg:border-l lg:border-t-0 lg:pl-10"
           noValidate
         >
-          <h2 className="text-2xl font-semibold">Solicitar cotação</h2>
+          <h2 className="text-3xl font-medium">Sobre você e seu espaço</h2>
           <Honeypot />
           {(
             [

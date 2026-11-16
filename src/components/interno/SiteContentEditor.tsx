@@ -351,6 +351,18 @@ export function SiteContentEditor({
       ...current,
       home: { ...current.home, hero: { ...current.home.hero, ...values } },
     }));
+  const patchEditorial = (values: Partial<SiteContent["home"]["editorial"]>) =>
+    setContent((current) => ({
+      ...current,
+      home: { ...current.home, editorial: { ...current.home.editorial, ...values } },
+    }));
+  const patchProcessStep = (index: number, values: Partial<SiteContent["home"]["editorial"]["processSteps"][number]>) =>
+    setContent((current) => ({
+      ...current,
+      home: { ...current.home, editorial: { ...current.home.editorial,
+        processSteps: current.home.editorial.processSteps.map((step, position) => position === index ? { ...step, ...values } : step),
+      } },
+    }));
   const patchSection = (id: SiteSectionId, values: Partial<SiteSection>) =>
     setContent((current) => ({
       ...current,
@@ -1146,6 +1158,38 @@ export function SiteContentEditor({
                             />
                           </div>
                         </>
+                      )}
+                      {section.id === "manifesto" && (
+                        <Field
+                          label="Complemento do manifesto"
+                          value={content.home.editorial.manifestoSupport}
+                          max={1200}
+                          multiline
+                          onChange={(manifestoSupport) => patchEditorial({ manifestoSupport })}
+                        />
+                      )}
+                      {section.id === "process" && (
+                        <div className="space-y-4 border-t pt-4">
+                          <h3 className="text-sm font-semibold">Etapas de atendimento</h3>
+                          {content.home.editorial.processSteps.map((step, index) => (
+                            <div key={index} className="space-y-3 rounded-lg border p-3">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="mr-auto text-sm font-medium">Etapa {index + 1}</span>
+                                <MoveButtons label={`Etapa ${index + 1}`} index={index} count={content.home.editorial.processSteps.length} move={(direction) => {
+                                  const processSteps = [...content.home.editorial.processSteps];
+                                  const next = index + direction;
+                                  if (next < 0 || next >= processSteps.length) return;
+                                  [processSteps[index], processSteps[next]] = [processSteps[next]!, processSteps[index]!];
+                                  patchEditorial({ processSteps });
+                                }} />
+                                <Button type="button" variant="ghost" size="sm" disabled={content.home.editorial.processSteps.length <= 1} onClick={() => patchEditorial({ processSteps: content.home.editorial.processSteps.filter((_, position) => position !== index) })}>Remover etapa</Button>
+                              </div>
+                              <Field label={`Título da etapa ${index + 1}`} value={step.title} max={80} onChange={(title) => patchProcessStep(index, { title })} />
+                              <Field label={`Descrição da etapa ${index + 1}`} value={step.text} max={400} multiline onChange={(text) => patchProcessStep(index, { text })} />
+                            </div>
+                          ))}
+                          <Button type="button" variant="outline" disabled={content.home.editorial.processSteps.length >= 8} onClick={() => patchEditorial({ processSteps: [...content.home.editorial.processSteps, { title: "Nova etapa", text: "" }] })}>Adicionar etapa</Button>
+                        </div>
                       )}
                       {section.id === "stats" && (
                         <div className="space-y-3 border-t pt-4">

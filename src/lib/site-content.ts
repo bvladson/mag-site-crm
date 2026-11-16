@@ -28,6 +28,8 @@ const navIds = SITE_NAVIGATION.map((item) => item.id) as [string, ...string[]];
 const navigationItem = z.object({ id: z.enum(navIds), label: plain(40, 1), enabled: z.boolean() }).strict();
 
 export const SITE_SECTIONS = [
+  { id: "manifesto", label: "Manifesto MAG", title: "O trabalho muda.\nO espaço precisa\nacompanhar.", eyebrow: "Espaço, trabalho e pessoas", text: "Móveis corporativos para espaços que precisam funcionar." },
+  { id: "process", label: "Processo de atendimento", title: "Do espaço vazio\nao ambiente pronto.", eyebrow: "O jeito MAG de fazer", text: "Um ambiente não termina na escolha dos móveis. Atendimento, estoque, entrega e montagem fazem parte do mesmo projeto." },
   { id: "categories", label: "Categorias", title: "O que você procura?", eyebrow: "", text: "" },
   { id: "ready", label: "Pronta entrega", title: "Pronta entrega", eyebrow: "Disponível agora", text: "Produtos disponíveis para você receber mais rápido." },
   { id: "featured", label: "Produtos em destaque", title: "Produtos que fazem a diferença no dia a dia.", eyebrow: "Catálogo MAG", text: "" },
@@ -52,6 +54,46 @@ export const siteSectionSchema = z.object({
   layout: z.enum(["default", "grid", "carousel"]), tone: z.enum(["default", "surface", "dark"]),
 }).strict();
 export type SiteSection = z.infer<typeof siteSectionSchema>;
+
+export function defaultSiteSection(id: SiteSectionId): SiteSection {
+  const definition = SITE_SECTIONS.find((item) => item.id === id)!;
+  const { title, eyebrow, text } = definition;
+  const buttons: Partial<Record<SiteSectionId, [string, string]>> = {
+    manifesto: ["Uma empresa por trás de cada ambiente", "/sobre"],
+    process: ["Conheça nosso processo", "/projetos"],
+    project: ["Quero falar sobre meu projeto", "/contato"],
+    cta: ["Solicitar orçamento", "/orcamento"],
+  };
+  return { id, title, eyebrow, text, enabled: true, image: null, imageAlt: "", buttonLabel: buttons[id]?.[0] ?? "", buttonHref: buttons[id]?.[1] ?? "", layout: "default", tone: id === "project" || id === "process" ? "dark" : ["featured", "stats", "people", "testimonials"].includes(id) ? "surface" : "default" };
+}
+
+export function defaultSiteEditorial() {
+  return {
+    manifestoSupport: "Da escolha de uma cadeira à organização de um escritório, a MAG reúne mobiliário, projetos e atendimento para aproximar o espaço da rotina de quem trabalha nele.",
+    processSteps: [
+      { title: "Entender", text: "Ouvir a equipe e conhecer a rotina do espaço." },
+      { title: "Planejar", text: "Relacionar mobiliário, circulação e necessidades." },
+      { title: "Separar", text: "Organizar os produtos para cada ambiente." },
+      { title: "Entregar", text: "Levar o mobiliário até a sua empresa." },
+      { title: "Montar", text: "Cuidar da montagem e dos detalhes." },
+      { title: "Ambiente pronto", text: "O espaço preparado para a rotina de trabalho." },
+    ],
+  };
+}
+
+// Expand only the complete previous schema. Existing immutable publications and
+// the relative order/content of their original sections remain untouched.
+const legacySectionIds = new Set(sectionIds.filter((id) => id !== "manifesto" && id !== "process"));
+const sectionsSchema = z.preprocess((value) => {
+  if (!Array.isArray(value) || value.length !== legacySectionIds.size) return value;
+  const ids = value.map((item) => item && typeof item === "object" ? item.id : null);
+  if (new Set(ids).size !== legacySectionIds.size || !ids.every((id) => legacySectionIds.has(id))) return value;
+  return [defaultSiteSection("manifesto"), defaultSiteSection("process"), ...value];
+}, z.array(siteSectionSchema).length(SITE_SECTIONS.length).refine((items) => new Set(items.map((item) => item.id)).size === SITE_SECTIONS.length, "As seções não podem se repetir."));
+const editorialSchema = z.object({
+  manifestoSupport: plain(1200),
+  processSteps: z.array(z.object({ title: plain(80, 1), text: plain(400) }).strict()).min(1).max(8),
+}).strict().default(defaultSiteEditorial);
 
 export const siteBannerSchema = z.object({
   id: z.string().uuid(), title: plain(160), text: plain(600), eyebrow: plain(100),
@@ -85,7 +127,8 @@ export const siteContentSchema = z.object({
       primaryLabel: plain(70), primaryHref: siteHrefSchema, secondaryLabel: plain(70), secondaryHref: siteHrefSchema,
       align: z.enum(["left", "center"]), imageFit: z.enum(["cover", "contain"]),
     }).strict(),
-    sections: z.array(siteSectionSchema).length(SITE_SECTIONS.length).refine((items) => new Set(items.map((item) => item.id)).size === SITE_SECTIONS.length, "As seções não podem se repetir."),
+    sections: sectionsSchema,
+    editorial: editorialSchema,
     banners: z.array(siteBannerSchema).max(12).refine((items) => new Set(items.map((item) => item.id)).size === items.length, "Os banners não podem se repetir."),
     stats: z.array(z.object({ label: plain(100, 1), value: plain(60) }).strict()).max(8),
   }).strict(),
@@ -107,7 +150,8 @@ export function defaultSiteContent(): SiteContent {
     announcement: { enabled: false, text: "", href: "", label: "" },
     home: {
       hero: { layout: "split", eyebrow: site.tagline, title: "Seu espaço trabalha melhor quando cada escolha faz sentido.", text: "Cadeiras, mesas, estações e projetos corporativos para empresas que valorizam conforto e produtividade.", desktopImage: null, mobileImage: null, imageAlt: "Sala de diretoria com mesa executiva e cadeira telada", primaryLabel: "Explorar produtos", primaryHref: "/produtos", secondaryLabel: "Falar com um especialista", secondaryHref: "/contato", align: "left", imageFit: "cover" },
-      sections: SITE_SECTIONS.map(({ id, title, eyebrow, text }) => ({ id, title, eyebrow, text, enabled: true, image: null, imageAlt: "", buttonLabel: id === "project" ? "Quero falar sobre meu projeto" : id === "cta" ? "Solicitar orçamento" : "", buttonHref: id === "project" ? "/contato" : id === "cta" ? "/orcamento" : "", layout: "default", tone: id === "project" ? "dark" : id === "featured" || id === "stats" || id === "people" || id === "testimonials" ? "surface" : "default" })),
+      sections: (["manifesto", "process", "cases", "environments", "ready", "featured", "solutions", "people", "social", "blog", "clients", "testimonials", "categories", "project", "banners", "stats", "cta"] as SiteSectionId[]).map(defaultSiteSection),
+      editorial: defaultSiteEditorial(),
       banners: [], stats: site.stats.map(({ label, value }) => ({ label, value: value ?? "" })),
     },
   };

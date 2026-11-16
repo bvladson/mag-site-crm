@@ -17,12 +17,12 @@ export const Route = createFileRoute("/blog/")({
     <>
       <PageHero eyebrow="Conteúdo" title="Conteúdo para espaços que precisam funcionar melhor." />
       <Section>
-        {posts.length === 0 && <div className="max-w-2xl rounded-md border bg-surface p-6">
-          <h2 className="text-2xl font-semibold">Vamos ajudar a planejar seu espaço.</h2>
+        {posts.length === 0 && <div className="mag-blog-empty max-w-3xl border-y py-10">
+          <h2 className="text-4xl font-medium">Vamos ajudar a planejar seu espaço.</h2>
           <p className="mt-2 text-muted-foreground">Enquanto preparamos novos conteúdos, fale com a equipe MAG para escolher o mobiliário adequado à sua empresa.</p>
           <Link to="/contato" className="mt-4 inline-block font-semibold text-brand hover:underline">Falar com um consultor</Link>
         </div>}
-        <div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-x-8 gap-y-14 sm:grid-cols-2 lg:grid-cols-3">
           {posts.map((p) => <PostCard key={p.slug} post={p} className="" />)}
         </div>
       </Section>

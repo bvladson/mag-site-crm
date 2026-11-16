@@ -1,36 +1,16 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Building2, Layers, RefreshCw, GraduationCap, MessagesSquare } from "lucide-react";
+import { ArrowUpRight } from "lucide-react";
 import { images } from "@/data/catalog";
-import { PageHero, Section } from "@/components/site/Section";
-import { Button } from "@/components/ui/button";
+import { EditorialHero, SectionIndex, MAGProcess, FinalCta, TextLink } from "@/components/site/Editorial";
 import { usePublicSite } from "@/components/site/SiteContentProvider";
+import { Button } from "@/components/ui/button";
 
-const items = [
-  {
-    icon: Building2,
-    t: "Compra corporativa",
-    d: "Atendimento para demandas em volume, com consultor dedicado.",
-  },
-  {
-    icon: Layers,
-    t: "Projetos completos",
-    d: "Do planejamento ao mobiliário, com fornecimento e montagem.",
-  },
-  {
-    icon: RefreshCw,
-    t: "Renovação de ambientes",
-    d: "Modernização de escritórios existentes, por etapas ou de uma vez.",
-  },
-  {
-    icon: GraduationCap,
-    t: "Mobiliário escolar",
-    d: "Soluções para escolas, universidades e centros de treinamento.",
-  },
-  {
-    icon: MessagesSquare,
-    t: "Atendimento consultivo",
-    d: "Ajuda para escolher os produtos adequados à rotina da equipe.",
-  },
+const solutions = [
+  ["Uma nova operação", "Projetos completos", "Organizar os ambientes, escolher o mobiliário e acompanhar o fornecimento e a montagem."],
+  ["Um espaço que precisa mudar", "Renovação de ambientes", "Rever estações, salas e áreas de convivência para acompanhar a rotina da empresa."],
+  ["Uma equipe em movimento", "Compra corporativa", "Cadeiras, mesas e armazenamento para compor as posições de trabalho."],
+  ["Espaços de aprendizagem", "Mobiliário escolar", "Escolhas para escolas, universidades e centros de treinamento."],
+  ["Dúvidas na escolha", "Atendimento consultivo", "Conversar sobre uso, ambiente e necessidades antes de definir o mobiliário."],
 ];
 
 export const Route = createFileRoute("/empresas")({
@@ -50,43 +30,12 @@ export const Route = createFileRoute("/empresas")({
     ],
     links: [{ rel: "canonical", href: "/empresas" }],
   }),
-  component: BusinessPage,
+  component: Companies,
 });
-function BusinessPage() {
+function Companies() {
   const { whatsappUrl, hasWhatsapp } = usePublicSite();
-  return (
-    <>
-      <PageHero
-        eyebrow="Empresas"
-        title="Da cadeira ao projeto completo."
-        text="A MAG atende empresas de todos os tamanhos com mobiliário, planejamento e montagem."
-        image={images.envReuniao}
-      />
-      <Section>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {items.map(({ icon: Icon, t, d }) => (
-            <div key={t} className="rounded-md border bg-card p-6">
-              <Icon className="size-7 text-brand" />
-              <h2 className="mt-4 text-2xl font-semibold">{t}</h2>
-              <p className="mt-2 text-muted-foreground">{d}</p>
-            </div>
-          ))}
-        </div>
-        <div className="mt-10 flex flex-col gap-2 sm:flex-row">
-          <Button asChild size="lg">
-            <Link to="/contato">Falar com um especialista</Link>
-          </Button>
-          <Button asChild size="lg" variant="whatsapp">
-            <a
-              href={whatsappUrl("Olá! Sou de uma empresa e gostaria de atendimento corporativo.")}
-              target={hasWhatsapp ? "_blank" : undefined}
-              rel="noreferrer"
-            >
-              {hasWhatsapp ? "WhatsApp corporativo" : "Atendimento corporativo"}
-            </a>
-          </Button>
-        </div>
-      </Section>
-    </>
-  );
+  return <><EditorialHero label="MAG / PARA EMPRESAS" title="Mobiliário para empresas." text="Um novo escritório. Uma equipe crescendo. Um espaço que precisa funcionar melhor." image={images.envOperacional} />
+    <section className="editorial-section"><div className="editorial-container"><SectionIndex index="01" label="Necessidades & soluções" /><div className="section-heading"><h2 className="display-title">O ponto de partida<br />é o seu negócio.</h2><p className="text-muted-foreground max-w-sm">Primeiro, entender a demanda. Depois, conectar mobiliário e operação ao que a sua empresa precisa.</p></div><div className="b2b-solutions">{solutions.map(([problem,title,desc],i) => <Link key={title} to="/contato" className="b2b-row"><span className="technical-label">0{i+1}</span><div><p className="text-sm text-muted-foreground mb-3">{problem}</p><h3 className="text-3xl lg:text-4xl">{title}</h3></div><p className="text-muted-foreground max-w-md">{desc}</p><ArrowUpRight className="size-6" /></Link>)}</div></div></section>
+    <MAGProcess />
+    <section className="editorial-section"><div className="editorial-container"><SectionIndex index="03" label="Briefing corporativo" /><div className="manifesto-grid mt-12"><h2 className="display-title">Conte o que<br />precisa funcionar.</h2><div><p className="editorial-copy">Seu ambiente, sua equipe, sua rotina.</p><p className="mt-6 text-muted-foreground">Compartilhe a necessidade da empresa ou reúna os produtos de interesse em uma lista de orçamento. A equipe MAG segue a conversa com você.</p><div className="flex flex-wrap gap-5"><TextLink to="/contato">Falar sobre meu espaço</TextLink><TextLink to="/produtos">Escolher mobiliário</TextLink></div><Button asChild variant="whatsapp" className="mt-6"><a href={whatsappUrl("Olá! Sou de uma empresa e gostaria de atendimento corporativo.")} target={hasWhatsapp ? "_blank" : undefined} rel="noreferrer">{hasWhatsapp ? "WhatsApp corporativo" : "Atendimento corporativo"}</a></Button></div></div></div></section><FinalCta /></>;
 }

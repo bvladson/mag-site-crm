@@ -1,4 +1,6 @@
 import { Link } from "@tanstack/react-router";
+import { ArrowUpRight } from "lucide-react";
+import "./Editorial.css";
 import { usePublicSite, useSiteContent } from "./SiteContentProvider";
 import { SITE_NAVIGATION } from "@/lib/site-content";
 import { categories } from "@/data/catalog";
@@ -8,10 +10,18 @@ import { NetworkIcon } from "./Social";
 import { unitMapUrl, unitPhoneLabel, type Unit } from "@/lib/units";
 
 /** Perfis oficiais vêm da configuração de redes (painel); rede desligada ou sem endereço não aparece. */
-export function Footer({ social = [], units }: { social?: SocialProfile[]; units?: Unit[] }) {
+export function Footer({
+  social = [],
+  units,
+}: {
+  social?: SocialProfile[];
+  units?: Unit[];
+}) {
   const { site, whatsappUrl, hasWhatsapp } = usePublicSite();
   const { content } = useSiteContent();
-  const showProducts = content.navigation.some((item) => item.id === "products" && item.enabled);
+  const showProducts = content.navigation.some(
+    (item) => item.id === "products" && item.enabled,
+  );
   const nav = content.navigation
     .filter((item) => item.enabled && item.id !== "products")
     .map((item) => ({
@@ -19,21 +29,27 @@ export function Footer({ social = [], units }: { social?: SocialProfile[]; units
       href: SITE_NAVIGATION.find((entry) => entry.id === item.id)!.href,
     }));
   const h = "mb-3 text-sm font-semibold text-graphite-foreground";
-  const l = "text-sm text-graphite-foreground/65 hover:text-graphite-foreground";
+  const l =
+    "text-sm text-graphite-foreground/65 hover:text-graphite-foreground";
   return (
-    <footer className="bg-graphite pb-24 text-graphite-foreground lg:pb-0">
-      <div className="mx-auto max-w-7xl px-4 py-14 lg:px-6">
+    <footer className="mag-footer">
+      <div className="editorial-container">
+        <div className="footer-opening">
+          <p className="footer-statement">{content.general.footerText}</p>
+          <Link to="/contato" className="editorial-link">
+            Vamos conversar
+            <ArrowUpRight />
+          </Link>
+        </div>
         <div
-          className={`grid gap-10 md:grid-cols-2 ${showProducts ? "lg:grid-cols-[1.4fr_1fr_1fr_1fr_1fr]" : "lg:grid-cols-[1.4fr_1fr_1fr_1fr]"}`}
+          data-products={showProducts ? "true" : "false"}
+          className={`footer-grid gap-10 md:grid-cols-2 ${showProducts ? "lg:grid-cols-[1.4fr_1fr_1fr_1fr_1fr]" : "lg:grid-cols-[1.4fr_1fr_1fr_1fr]"}`}
         >
           <div>
-            <div className="inline-block rounded-md bg-card p-3">
-              <Logo className="h-10" />
+            <div className="inline-block">
+              <Logo className="mag-footer-logo h-16" />
             </div>
-            <p className="mt-4 max-w-xs text-sm text-graphite-foreground/65">
-              {content.general.footerText}
-            </p>
-            <div className="mt-5 flex gap-2">
+            <div className="footer-social-links mt-5 flex flex-wrap gap-2">
               {social.map((profile) => (
                 <a
                   key={profile.network}
@@ -62,7 +78,11 @@ export function Footer({ social = [], units }: { social?: SocialProfile[]; units
               <ul className="space-y-2">
                 {categories.slice(0, 7).map((c) => (
                   <li key={c.slug}>
-                    <Link to="/categoria/$slug" params={{ slug: c.slug }} className={l}>
+                    <Link
+                      to="/categoria/$slug"
+                      params={{ slug: c.slug }}
+                      className={l}
+                    >
                       {c.name}
                     </Link>
                   </li>
@@ -92,7 +112,10 @@ export function Footer({ social = [], units }: { social?: SocialProfile[]; units
               </li>
               {site.phone && (
                 <li>
-                  <a href={`tel:${site.phone.replace(/[^+0-9]/g, "")}`} className={l}>
+                  <a
+                    href={`tel:${site.phone.replace(/[^+0-9]/g, "")}`}
+                    className={l}
+                  >
                     {site.phone}
                   </a>
                 </li>
@@ -104,10 +127,17 @@ export function Footer({ social = [], units }: { social?: SocialProfile[]; units
                   </a>
                 </li>
               )}
-              {units === undefined && site.address && <li className={l}>{site.address}</li>}
+              {units === undefined && site.address && (
+                <li className={l}>{site.address}</li>
+              )}
               {units?.map((unit) => (
-                <li key={unit.id} className="border-t border-graphite-foreground/15 pt-3">
-                  <p className="mb-1 text-sm font-semibold">Unidade {unit.name}</p>
+                <li
+                  key={unit.id}
+                  className="border-t border-graphite-foreground/15 pt-3"
+                >
+                  <p className="mb-1 text-sm font-semibold">
+                    Unidade {unit.name}
+                  </p>
                   <a
                     href={unitMapUrl(unit)}
                     target="_blank"
@@ -117,7 +147,10 @@ export function Footer({ social = [], units }: { social?: SocialProfile[]; units
                     {unit.address}
                   </a>
                   {unit.phone && (
-                    <a href={`tel:+${unit.phone}`} className={`mt-1 block ${l}`}>
+                    <a
+                      href={`tel:+${unit.phone}`}
+                      className={`mt-1 block ${l}`}
+                    >
                       {unitPhoneLabel(unit.phone)}
                     </a>
                   )}
@@ -157,7 +190,9 @@ export function Footer({ social = [], units }: { social?: SocialProfile[]; units
               <li>
                 <button
                   type="button"
-                  onClick={() => window.dispatchEvent(new Event("mag:open-cookies"))}
+                  onClick={() =>
+                    window.dispatchEvent(new Event("mag:open-cookies"))
+                  }
                   className={l}
                 >
                   Preferências de cookies
@@ -176,7 +211,7 @@ export function Footer({ social = [], units }: { social?: SocialProfile[]; units
             </ul>
           </div>
         </div>
-        <div className="mt-12 flex flex-col gap-2 border-t border-graphite-foreground/10 pt-6 text-xs text-graphite-foreground/50 md:flex-row md:justify-between">
+        <div className="footer-bottom">
           <p>
             © {new Date().getFullYear()} {site.name}
             {site.cnpj && ` · CNPJ ${site.cnpj}`}

@@ -14,12 +14,12 @@ export const Route = createFileRoute("/carreiras/banco-de-talentos")({
     links: [{ rel: "canonical", href: "/carreiras/banco-de-talentos" }],
   }),
   component: () => (
-    <Section>
+    <Section className="mag-careers-application">
       <nav className="text-xs text-muted-foreground"><Link to="/carreiras">Carreiras</Link> / Banco de talentos</nav>
-      <div className="mt-5 grid gap-10 lg:grid-cols-[1fr_1.3fr]">
+      <div className="mt-8 grid gap-12 lg:grid-cols-[1fr_1.3fr] lg:gap-20">
         <div>
           <p className="eyebrow">Banco de talentos</p>
-          <h1 className="mt-2 text-4xl font-semibold lg:text-6xl">Seu próximo capítulo pode ser na MAG.</h1>
+          <h1 className="display-title mt-5">Seu próximo capítulo pode ser na MAG.</h1>
           <p className="mt-4 text-muted-foreground lg:text-lg">Não encontrou uma vaga para o seu perfil? Cadastre seu currículo. Quando surgir uma oportunidade na sua área, o DHO entra em contato.</p>
         </div>
         <ApplicationForm />

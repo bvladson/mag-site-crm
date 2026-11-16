@@ -10,6 +10,7 @@ import { ProductCard, formatPrice } from "@/components/site/ProductCard";
 import { Button } from "@/components/ui/button";
 import { usePublicSite } from "@/components/site/SiteContentProvider";
 import { breadcrumb, jsonLd } from "@/lib/seo";
+import "@/components/site/EditorialPages.css";
 
 /** Texto para busca e compartilhamento: SEO editorial → resumo → descrição → frase segura com nome e categoria. */
 const summaryOf = (p: {
@@ -144,8 +145,8 @@ function ProductPage() {
   ];
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-6 lg:px-6 lg:py-10">
-      <nav className="mb-5 text-xs text-muted-foreground">
+    <div className="mag-product-detail editorial-container py-8 lg:py-16">
+      <nav className="mb-8 text-xs text-muted-foreground">
         <Link to="/">Início</Link> / <Link to="/produtos">Produtos</Link> /{" "}
         <Link to="/categoria/$slug" params={{ slug: p.category }}>
           {categoryName(p.category)}
@@ -155,7 +156,7 @@ function ProductPage() {
         <div>
           <button
             onClick={() => setZoom((z) => !z)}
-            className={`block w-full overflow-hidden rounded-md bg-surface ${zoom ? "cursor-zoom-out" : "cursor-zoom-in"}`}
+            className={`block w-full overflow-hidden bg-surface ${zoom ? "cursor-zoom-out" : "cursor-zoom-in"}`}
             aria-label="Ampliar imagem"
           >
             <ProductImage
@@ -192,7 +193,7 @@ function ProductPage() {
               </span>
             )}
           </div>
-          <h1 className="mt-3 text-4xl font-semibold leading-[1.02] lg:text-5xl">{p.name}</h1>
+          <h1 className="mag-product-title mt-4 text-4xl font-medium leading-[1.05] lg:text-5xl">{p.name}</h1>
           <p className="mt-2 text-sm text-muted-foreground">
             {[`SKU ${p.sku}`, p.brand, categoryName(p.category)].filter(Boolean).join(" · ")}
           </p>
@@ -272,7 +273,7 @@ function ProductPage() {
         </div>
       </div>
 
-      <div className="mt-14 grid gap-10 lg:grid-cols-2">
+      <div className="mt-16 grid gap-10 border-t pt-12 lg:grid-cols-2">
         <section>
           {p.description ? (
             <>
@@ -302,7 +303,7 @@ function ProductPage() {
       </div>
 
       {related.length > 0 && (
-        <section className="mt-14">
+        <section className="mt-16 border-t pt-12">
           <h2 className="mb-5 text-2xl font-semibold">Complete seu ambiente</h2>
           <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4">
             {related.map((r) => (

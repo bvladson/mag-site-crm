@@ -71,10 +71,10 @@ function JobPage() {
   const { job: j } = Route.useLoaderData();
   const facts = jobFacts(j);
   return (
-    <Section>
+    <Section className="mag-careers-application">
       <nav className="text-xs text-muted-foreground"><Link to="/carreiras">Carreiras</Link> / {j.title}</nav>
       {j.area && <p className="eyebrow mt-5">{j.area}</p>}
-      <h1 className="mt-2 text-4xl font-semibold lg:text-6xl">{j.title}</h1>
+      <h1 className="display-title mt-5">{j.title}</h1>
       <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-muted-foreground">
         {facts && <p className="flex items-center gap-1"><MapPin className="size-4 shrink-0" /> {facts}</p>}
         {j.schedule && <p className="flex items-center gap-1"><Clock className="size-4 shrink-0" /> {j.schedule}</p>}
@@ -90,7 +90,7 @@ function JobPage() {
           </div>
         </div>
       ) : (
-        <div className="mt-6 grid gap-10 lg:grid-cols-[1fr_1fr]">
+        <div className="mt-12 grid gap-12 lg:grid-cols-[1fr_1fr] lg:gap-20">
           <div className="max-w-2xl">
             {j.summary && <p className="text-lg">{j.summary}</p>}
             {j.description && j.description.split(/\n\s*\n/).map((paragraph, index) => <p key={index} className="mt-4 whitespace-pre-line text-muted-foreground">{paragraph}</p>)}

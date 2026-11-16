@@ -18,6 +18,8 @@ const buttonVariants = cva(
         link: "text-primary underline-offset-4 hover:underline",
         inverse: "bg-card text-foreground hover:bg-card/90",
         whatsapp: "bg-success text-primary-foreground hover:bg-success/90",
+        film: "bg-transparent text-graphite-foreground hover:bg-graphite-foreground/10 border-b border-graphite-foreground/40 rounded-none",
+        editorial: "bg-transparent text-foreground hover:text-brand rounded-none",
       },
       size: {
         default: "h-10 px-4 py-2",

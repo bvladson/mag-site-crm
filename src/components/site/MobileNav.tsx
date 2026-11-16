@@ -1,16 +1,36 @@
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
-import { Home, LayoutGrid, Search, ClipboardList, MessageCircle, ChevronRight } from "lucide-react";
+import {
+  Home,
+  LayoutGrid,
+  Search,
+  ClipboardList,
+  MessageCircle,
+  ChevronRight,
+} from "lucide-react";
 import { useQuote } from "@/lib/quote";
-import { usePublicSite, useSiteContent } from "./SiteContentProvider";
+import {
+  usePublicSite,
+  useSiteContent,
+  usePublicSiteTheme,
+} from "./SiteContentProvider";
 import { SITE_NAVIGATION } from "@/lib/site-content";
 import { categories, showcaseCategories } from "@/data/catalog";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 
 // Mobiliário primeiro; "Peças e reposição" no fim. "Outros" fica só nos filtros do catálogo.
-const drawerCats = [...showcaseCategories.map((category) => category.slug), "pecas"];
+const drawerCats = [
+  ...showcaseCategories.map((category) => category.slug),
+  "pecas",
+];
 
 export function MobileNav() {
+  const themeStyle = usePublicSiteTheme();
   const { whatsappUrl, hasWhatsapp } = usePublicSite();
   const { content } = useSiteContent();
   const nav = content.navigation
@@ -25,14 +45,20 @@ export function MobileNav() {
   const item =
     "flex flex-1 flex-col items-center gap-0.5 py-2 text-[11px] font-medium text-muted-foreground";
   const active = { className: "text-brand!" };
-  const row = "flex items-center justify-between border-b py-3.5 text-base font-medium";
+  const row =
+    "flex items-center justify-between border-b py-3.5 text-base font-medium";
   return (
     <>
       <nav
-        className="fixed inset-x-0 bottom-0 z-40 flex border-t bg-card/95 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:hidden"
+        className="mag-mobile-nav fixed inset-x-0 bottom-0 z-40 flex border-t bg-card/95 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:hidden"
         aria-label="Navegação principal"
       >
-        <Link to="/" className={item} activeProps={active} activeOptions={{ exact: true }}>
+        <Link
+          to="/"
+          className={item}
+          activeProps={active}
+          activeOptions={{ exact: true }}
+        >
           <Home className="size-5" /> Início
         </Link>
         <button
@@ -40,14 +66,19 @@ export function MobileNav() {
           className={`${item} ${open ? "text-brand" : ""}`}
           aria-expanded={open}
         >
-          <LayoutGrid className="size-5" /> {showProducts ? "Categorias" : "Menu"}
+          <LayoutGrid className="size-5" />{" "}
+          {showProducts ? "Categorias" : "Menu"}
         </button>
         {showProducts && (
           <Link to="/produtos" className={item} activeProps={active}>
             <Search className="size-5" /> Buscar
           </Link>
         )}
-        <Link to="/orcamento" className={`${item} relative`} activeProps={active}>
+        <Link
+          to="/orcamento"
+          className={`${item} relative`}
+          activeProps={active}
+        >
           <ClipboardList className="size-5" /> Orçamento
           {count > 0 && (
             <span className="absolute right-[22%] top-1 grid min-w-4 place-items-center rounded-full bg-brand px-1 text-[10px] text-primary-foreground">
@@ -61,11 +92,16 @@ export function MobileNav() {
           rel="noreferrer"
           className={`${item} text-success`}
         >
-          <MessageCircle className="size-5" /> {hasWhatsapp ? "WhatsApp" : "Contato"}
+          <MessageCircle className="size-5" />{" "}
+          {hasWhatsapp ? "WhatsApp" : "Contato"}
         </a>
       </nav>
       <Sheet open={open} onOpenChange={setOpen}>
-        <SheetContent side="bottom" className="max-h-[85vh] overflow-y-auto rounded-t-xl">
+        <SheetContent
+          style={themeStyle}
+          side="bottom"
+          className="public-site mag-mobile-drawer max-h-[85vh] overflow-y-auto"
+        >
           <SheetHeader>
             <SheetTitle>{showProducts ? "Categorias" : "Menu"}</SheetTitle>
           </SheetHeader>
@@ -96,7 +132,11 @@ export function MobileNav() {
               })}
             {nav.map((entry) => (
               <li key={entry.id}>
-                <Link to={entry.href} onClick={() => setOpen(false)} className={row}>
+                <Link
+                  to={entry.href}
+                  onClick={() => setOpen(false)}
+                  className={row}
+                >
                   {entry.label}
                   <ChevronRight className="size-4" />
                 </Link>

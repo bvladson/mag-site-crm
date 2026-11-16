@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import "./EditorialPages.css";
 import { SlidersHorizontal, X, SearchX } from "lucide-react";
 import { categories, environments, type ProductSummary } from "@/data/catalog";
 import { useCatalog } from "./CatalogProvider";
@@ -63,20 +64,20 @@ export function Catalog({ q = "", initialCategory, initialEnv }: { q?: string; i
   );
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-6 lg:px-6 lg:py-10">
-      <div className="mb-5">
+    <div className="mag-catalog editorial-container py-10 lg:py-16">
+      <div className="mb-8">
         <input
           value={term}
           onChange={(e) => setTerm(e.target.value)}
           placeholder="Buscar por nome, categoria ou ambiente"
           aria-label="Buscar no catálogo"
-          className="h-12 w-full rounded-md border border-input bg-card px-4 outline-none focus:border-foreground/40"
+          className="mag-catalog-search h-14 w-full border-b border-input bg-transparent px-0 text-base outline-none focus:border-brand"
         />
       </div>
-      <div className="grid gap-8 lg:grid-cols-[240px_1fr]">
-        <aside className="hidden lg:block">{filters}</aside>
+      <div className="grid gap-10 lg:grid-cols-[210px_minmax(0,1fr)] lg:gap-14">
+        <aside className="mag-catalog-filters hidden lg:block">{filters}</aside>
         <div>
-          <div className="mb-4 flex items-center justify-between gap-3">
+          <div className="mb-7 flex items-center justify-between gap-3 border-b pb-5">
             <p className="text-sm text-muted-foreground"><b className="text-foreground">{list.length}</b> resultados</p>
             <div className="flex min-w-0 items-center gap-2">
               <Sheet>
@@ -116,7 +117,7 @@ export function Catalog({ q = "", initialCategory, initialEnv }: { q?: string; i
               <p className="mt-1 text-sm text-muted-foreground">Tente outros termos ou fale com um consultor.</p>
             </div>
           ) : (
-            <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 xl:grid-cols-4">
+            <div className="mag-catalog-grid grid grid-cols-2 gap-x-5 gap-y-10 md:grid-cols-3 xl:grid-cols-4">
               {visible.map((p) => <ProductCard key={p.slug} product={p} />)}
             </div>
           )}
@@ -134,7 +135,7 @@ export function Catalog({ q = "", initialCategory, initialEnv }: { q?: string; i
 function FilterGroup({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <fieldset>
-      <legend className="mb-3 text-sm font-semibold">{title}</legend>
+      <legend className="technical-label mb-4 text-sm font-semibold">{title}</legend>
       <div className="space-y-2">{children}</div>
     </fieldset>
   );
