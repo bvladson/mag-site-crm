@@ -59,6 +59,9 @@ class SaudeHostTest(unittest.TestCase):
             "mag-waha-waha-1|running|Up 2 days (unhealthy)",
             "mag-site-omie-sync-1|exited|Exited (0) 5 hours ago",
             "biomie-v2-web-1|running|Up 9 days (healthy)",
+            "mag-waha-stage-20261106-waha-1|exited|Exited (0) 4 days ago",
+            "mag-waha-stage-20261106-etapa2-waha-1|running|Up 4 days (unhealthy)",
+            "mag-site-hml-web-1|exited|Exited (137) 2 days ago",
         ])
         return subprocess.CompletedProcess(args, 0, stdout=saida, stderr="")
 
@@ -74,7 +77,7 @@ class SaudeHostTest(unittest.TestCase):
         self.assertFalse(site["falhaPendente"])
         self.assertEqual((whatsapp["ultimo"], whatsapp["ok"], whatsapp["falhaPendente"]), (None, False, True))
         self.assertEqual([c["nome"] for c in dados["containers"]], ["mag-site-omie-sync-1", "mag-site-web-1", "mag-waha-waha-1"],
-                         "só os contêineres do site e do WhatsApp")
+                         "só os contêineres de produção do site e do WhatsApp (homologação fica fora)")
         self.assertEqual(dados["containers"][2]["saude"], "unhealthy")
         self.assertEqual(dados["memoria"], {"usoPct": 75, "disponivelMb": 1953})
         vigia = dados["vigiaWhatsapp"]
@@ -128,6 +131,31 @@ class SaudeHostTest(unittest.TestCase):
         self.m.alertar(ruim, 1_800_000_000)
         self.assertEqual(self.m.alertar(ruim, 1_800_000_300), ["ALERTA MAG: Disco da VPS com 99% de uso (1 GB livres)."],
                          "sem token a mensagem não sai, mas o estado segue e tenta de novo")
+
+    def test_homologacao_parada_nao_vira_alerta(self):
+        """Retrato da produção em 16/11/2026: tudo saudável e um WhatsApp de homologação parado de propósito."""
+        def docker(*args, **kwargs):
+            saida = "\n".join([
+                "mag-site-omie-consulta-1|running|Up 2 hours (healthy)",
+                "mag-site-omie-pedidos-1|running|Up 2 hours (healthy)",
+                "mag-site-web-1|running|Up 2 hours (healthy)",
+                "mag-waha-stage-20261106-etapa2-waha-1|running|Up 4 days (healthy)",
+                "mag-waha-stage-20261106-waha-1|exited|Exited (0) 4 days ago",
+                "mag-waha-waha-1|running|Up 4 days (healthy)",
+            ])
+            return subprocess.CompletedProcess(args, 0, stdout=saida, stderr="")
+        with mock.patch.object(self.m.subprocess, "run", docker):
+            containers = self.m.conteineres()
+        self.assertNotIn("stage", json.dumps(containers))
+        agora = time.time()
+        dados = {"disco": {"usoPct": 75, "livreGb": 23.6}, "memoria": {"usoPct": 46}, "containers": containers,
+                 "backups": [{"projeto": "mag-site", "ultimo": self.m.iso(agora - 3600)},
+                             {"projeto": "mag-whatsapp", "ultimo": self.m.iso(agora - 7 * 3600)}]}
+        self.assertEqual(self.m.problemas_criticos(dados, agora), {}, "nada crítico: nenhum alerta")
+        enviados = []
+        for passo in range(3):
+            self.m.alertar(dados, agora + passo * 300, lambda texto: enviados.append(texto) or True)
+        self.assertEqual(enviados, [])
 
     def test_docker_indisponivel_nao_derruba_a_coleta(self):
         def falha(*args, **kwargs):

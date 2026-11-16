@@ -9,8 +9,9 @@ RESULTADO do log e marcador de falha) e o estado do vigia do WhatsApp. Nunca gra
 conteúdo de mensagem nem nome de arquivo de backup. Somente leitura do servidor: não reinicia nem altera nada.
 
 Variáveis (opcionais): MAG_SAUDE_SAIDA, MAG_SAUDE_PROJETOS ("mag-site mag-whatsapp"), MAG_SAUDE_CONTEINERES
-(prefixos, "mag-site mag-waha"), MAG_SAUDE_SRV (/srv), MAG_SAUDE_LOGS (/var/log), MAG_SAUDE_FALHAS
-(/var/lib/vps-backup/falhas), MAG_SAUDE_VIGIA (/var/lib/mag-whatsapp), MAG_SAUDE_DOCKER (docker).
+(prefixos, "mag-site mag-waha"), MAG_SAUDE_IGNORAR (trechos de nome de homologação, "-stage- -hml-"),
+MAG_SAUDE_SRV (/srv), MAG_SAUDE_LOGS (/var/log), MAG_SAUDE_FALHAS (/var/lib/vps-backup/falhas),
+MAG_SAUDE_VIGIA (/var/lib/mag-whatsapp), MAG_SAUDE_DOCKER (docker).
 Uso: saude-host.py [--imprimir]
 """
 import datetime as dt
@@ -25,6 +26,9 @@ import tempfile
 SAIDA = os.environ.get("MAG_SAUDE_SAIDA", "/opt/mag-site/data/saude-host.json")
 PROJETOS = os.environ.get("MAG_SAUDE_PROJETOS", "mag-site mag-whatsapp").split()
 PREFIXOS = os.environ.get("MAG_SAUDE_CONTEINERES", "mag-site mag-waha").split()
+# Homologação (ex.: mag-waha-stage-20261106-waha-1, parado de propósito) não é produção: fica fora do retrato,
+# do painel e dos alertas. Sem isso o painel ficaria "crítico" e o Telegram avisaria a cada 6 h por nada.
+IGNORAR = os.environ.get("MAG_SAUDE_IGNORAR", "-stage- -hml-").split()
 SRV = os.environ.get("MAG_SAUDE_SRV", "/srv")
 LOGS = os.environ.get("MAG_SAUDE_LOGS", "/var/log")
 FALHAS = os.environ.get("MAG_SAUDE_FALHAS", "/var/lib/vps-backup/falhas")
@@ -64,7 +68,7 @@ def conteineres():
     for linha in saida.splitlines():
         nome, _, resto = linha.partition("|")
         estado, _, status = resto.partition("|")
-        if not any(nome.startswith(p) for p in PREFIXOS):
+        if not any(nome.startswith(p) for p in PREFIXOS) or any(trecho in nome for trecho in IGNORAR):
             continue
         saude = re.search(r"\((healthy|unhealthy|health: starting)\)", status)
         lista.append({"nome": nome, "estado": estado, "saude": saude.group(1) if saude else None})
