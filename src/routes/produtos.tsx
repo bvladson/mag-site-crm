@@ -21,9 +21,9 @@ function ProductsPage() {
   return (
     <>
       <div className="border-b bg-surface">
-        <div className="mx-auto max-w-7xl px-4 py-6 lg:px-6 lg:py-10">
+        <div className="editorial-container py-10 lg:py-16">
           <nav className="text-xs text-muted-foreground"><Link to="/">Início</Link> / Produtos</nav>
-          <h1 className="mt-2 text-4xl font-semibold lg:text-5xl">Produtos</h1>
+          <h1 className="display-title mt-5">Produtos</h1>
         </div>
       </div>
       <Catalog key={q ?? ""} q={q ?? ""} />

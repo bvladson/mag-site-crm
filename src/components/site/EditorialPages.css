@@ -1,0 +1,36 @@
+/* Extensions for the public catalog and real commercial forms. */
+.public-site .mag-page-section .mag-section-heading h2 { font-size: clamp(2rem, 3.5vw, 3.5rem); line-height: 1.05; }
+.public-site .mag-catalog { min-width: 0; }
+.public-site .mag-catalog-filters fieldset + fieldset { border-top: 1px solid var(--border); padding-top: 24px; }
+.public-site .mag-catalog-search::placeholder { color: var(--muted-foreground); }
+.public-site .mag-catalog-grid > article { min-width: 0; }
+.public-site .mag-product-link { border-bottom: 1px solid var(--border); }
+.public-site .mag-product-title { overflow-wrap: anywhere; }
+.public-site .mag-product-detail > nav { line-height: 1.8; }
+.public-site .mag-editorial-form { border-radius: 0; align-self: start; }
+.public-site .mag-editorial-form input:not([type="checkbox"]):not([type="radio"]),
+.public-site .mag-editorial-form textarea,
+.public-site .mag-editorial-form select,
+.public-site .mag-careers-application form input:not([type="checkbox"]):not([type="radio"]),
+.public-site .mag-careers-application form textarea,
+.public-site .mag-careers-application form select { border-radius: 0; }
+.public-site .mag-editorial-form input:focus-visible,
+.public-site .mag-editorial-form textarea:focus-visible,
+.public-site .mag-editorial-form select:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.public-site .mag-contact-info { min-width: 0; }
+.public-site .mag-contact-info a, .public-site .mag-contact-info p { overflow-wrap: anywhere; }
+.public-site .mag-contact-unit { border-radius: 0; }
+.public-site .mag-career-jobs a { transition: color .2s, background-color .2s; }
+.public-site .mag-career-jobs a:hover h3 { color: var(--brand); }
+.public-site .mag-careers-application form { border-radius: 0; }
+.public-site .mag-article { overflow-wrap: anywhere; }
+.public-site .mag-environments-page .environment-entry { padding: 0; aspect-ratio: 4 / 3; }
+.public-site .mag-environments-page .environment-entry:nth-child(even) { margin-top: 72px; }
+.public-site .mag-environments-page .environment-entry > img { height: 100%; min-height: 0; }
+@media (max-width: 767px) {
+  .public-site .mag-catalog-grid { column-gap: 16px; row-gap: 32px; }
+  .public-site .mag-catalog select { max-width: 160px; }
+  .public-site .mag-environments-page .environment-portfolio { grid-template-columns: 1fr; gap: 24px; }
+  .public-site .mag-environments-page .environment-entry:nth-child(even) { margin-top: 0; }
+  .public-site .mag-contact-grid { gap: 48px; }
+}

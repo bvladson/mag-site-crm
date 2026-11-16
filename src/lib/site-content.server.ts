@@ -87,6 +87,8 @@ function publicContent(content: SiteContent, at: Date) {
   visible.home.sections = visible.home.sections.filter((section) => section.enabled);
   if (!visible.home.sections.some((section) => section.id === "banners")) visible.home.banners = [];
   if (!visible.home.sections.some((section) => section.id === "stats")) visible.home.stats = [];
+  if (!visible.home.sections.some((section) => section.id === "manifesto")) visible.home.editorial.manifestoSupport = "";
+  if (!visible.home.sections.some((section) => section.id === "process")) visible.home.editorial.processSteps = [];
   if (!visible.announcement.enabled) visible.announcement = { enabled: false, text: "", href: "", label: "" };
   return visible;
 }

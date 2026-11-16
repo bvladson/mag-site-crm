@@ -86,14 +86,14 @@ function ContactPage() {
   return (
     <>
       <PageHero
-        eyebrow="Contato"
+        eyebrow="MAG / CONTATO"
         title="Conte o que sua empresa precisa."
         text="A equipe MAG ajuda você a encontrar a melhor solução."
       />
       <Section>
-        <div className="grid gap-10 lg:grid-cols-[1fr_1.3fr]">
-          <div className="space-y-3">
-            <h2 className="text-3xl font-semibold">Vamos conversar?</h2>
+        <div className="mag-contact-grid grid gap-12 lg:grid-cols-[1fr_1.3fr] lg:gap-20">
+          <div className="mag-contact-info space-y-5">
+            <p className="technical-label mb-5">Atendimento MAG</p><h2 className="text-3xl font-medium">Vamos conversar?</h2>
             <p className="text-muted-foreground">
               Envie sua mensagem pelo formulário. Nossa equipe vai retornar pelos dados de contato
               que você informar.
@@ -103,7 +103,7 @@ function ContactPage() {
                 href={whatsappUrl()}
                 target="_blank"
                 rel="noreferrer"
-                className="flex items-center gap-4 rounded-md bg-success p-5 text-primary-foreground"
+                className="flex items-center gap-4 bg-primary px-5 py-4 text-primary-foreground"
               >
                 <MessageCircle className="size-6" />
                 <span>
@@ -118,7 +118,7 @@ function ContactPage() {
             ]
               .filter(({ l }) => Boolean(l))
               .map(({ icon: Icon, l }) => (
-                <div key={l} className="flex items-center gap-4 rounded-md border p-5">
+                <div key={l} className="flex items-center gap-4 border-b py-5">
                   <Icon className="size-5 text-brand" />
                   <span className="text-sm">{l}</span>
                 </div>
@@ -126,7 +126,7 @@ function ContactPage() {
             {units.map((unit) => (
               <section
                 key={unit.id}
-                className="rounded-lg border border-l-4 bg-card p-5"
+                className="mag-contact-unit border-b border-l-2 bg-card px-5 py-7"
                 style={{
                   borderLeftColor: {
                     red: "#9a3035",
@@ -180,7 +180,7 @@ function ContactPage() {
             ))}
           </div>
           {done ? (
-            <div className="rounded-md border bg-surface p-6 lg:p-8">
+            <div className="mag-editorial-form border-t pt-6 lg:border-l lg:border-t-0 lg:pl-10">
               <CheckCircle2 className="size-8 text-success" />
               <h2 className="mt-3 text-3xl font-semibold">Mensagem recebida!</h2>
               <p className="mt-1 text-muted-foreground">
@@ -204,7 +204,7 @@ function ContactPage() {
             <form
               onSubmit={submit}
               noValidate
-              className="relative space-y-3 rounded-md border bg-surface p-5 lg:p-8"
+              className="mag-editorial-form relative space-y-5 border-t pt-6 lg:border-l lg:border-t-0 lg:pl-10"
             >
               <Honeypot />
               <div className="grid gap-3 sm:grid-cols-2">

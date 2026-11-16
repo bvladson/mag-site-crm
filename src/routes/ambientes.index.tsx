@@ -15,14 +15,14 @@ export const Route = createFileRoute("/ambientes/")({
   component: () => (
     <>
       <PageHero eyebrow="Ambientes" title="Encontre soluções para o seu ambiente." text="Escolha o espaço e veja os produtos indicados para ele." />
-      <Section>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <Section className="mag-environments-page">
+        <div className="environment-portfolio">
           {environments.map((e) => (
-            <Link key={e.slug} to="/ambientes/$slug" params={{ slug: e.slug }} className="group relative overflow-hidden rounded-md">
-              <img src={e.image} alt="" loading="lazy" className="aspect-[4/3] w-full object-cover transition duration-700 group-hover:scale-[1.04]" />
+            <Link key={e.slug} to="/ambientes/$slug" params={{ slug: e.slug }} className="environment-entry group relative overflow-hidden">
+              <img src={e.image} alt="" loading="lazy" className="h-full min-h-80 w-full object-cover transition duration-700 group-hover:scale-[1.04]" />
               <div className="absolute inset-0 bg-gradient-to-t from-graphite/85 to-transparent" />
-              <div className="absolute bottom-0 p-5 text-graphite-foreground">
-                <h2 className="text-2xl font-semibold">{e.name}</h2>
+              <div className="absolute bottom-0 p-7 text-graphite-foreground lg:p-10">
+                <h2 className="text-4xl font-medium lg:text-5xl">{e.name}</h2>
                 <p className="text-sm text-graphite-foreground/80">{e.tagline}</p>
               </div>
             </Link>
@@ -33,7 +33,7 @@ export const Route = createFileRoute("/ambientes/")({
         <SectionHeader title="Ou navegue por categoria" />
         <div className="flex flex-wrap gap-2">
           {categories.map((c) => (
-            <Link key={c.slug} to="/categoria/$slug" params={{ slug: c.slug }} className="rounded-full border bg-card px-4 py-2 text-sm font-medium hover:border-brand hover:text-brand">{c.name}</Link>
+            <Link key={c.slug} to="/categoria/$slug" params={{ slug: c.slug }} className="mr-6 border-b border-foreground/20 px-0 py-3 text-base font-medium hover:border-brand hover:text-brand">{c.name}</Link>
           ))}
         </div>
       </Section>

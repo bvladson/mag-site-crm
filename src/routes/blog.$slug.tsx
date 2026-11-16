@@ -29,12 +29,12 @@ export const Route = createFileRoute("/blog/$slug")({
 function PostPage() {
   const { post } = Route.useLoaderData();
   return (
-    <article className="mx-auto max-w-3xl px-4 py-10 lg:py-16">
+    <article className="mag-article mx-auto max-w-4xl px-6 py-12 lg:py-24">
       <nav className="text-xs text-muted-foreground"><Link to="/blog">Blog</Link> / {post.category}</nav>
-      <p className="eyebrow mt-5">{post.category} · {post.minutes} min</p>
-      <h1 className="mt-2 text-4xl font-semibold leading-[1.02] lg:text-6xl">{post.title}</h1>
+      <p className="technical-label mt-8 text-muted-foreground">{post.category} · {post.minutes} min</p>
+      <h1 className="display-title mt-5">{post.title}</h1>
       <p className="mt-4 text-lg text-muted-foreground">{post.excerpt}</p>
-      <img src={post.image} alt="" className="mt-8 aspect-[16/9] w-full rounded-md object-cover" />
+      <img src={post.image} alt="" className="mt-12 aspect-[16/9] w-full object-cover" />
       <p className="mt-8 text-muted-foreground">O conteúdo completo deste artigo será publicado pela equipe MAG.</p>
       <DemoNote>Artigo demonstrativo.</DemoNote>
     </article>

@@ -7,6 +7,7 @@ import {
   type SiteContent,
 } from "@/lib/site-content";
 import "./SiteContentProvider.css";
+import "./Editorial.css";
 
 type SiteContext = { content: SiteContent; preview: boolean };
 const SiteContentContext = createContext<SiteContext>({
@@ -24,6 +25,17 @@ export function SiteContentProvider({
   children: ReactNode;
 }) {
   const value = useMemo(() => ({ content, preview }), [content, preview]);
+  const style = getSiteAppearanceStyle(content);
+  return (
+    <SiteContentContext.Provider value={value}>
+      <div className="site-public public-site" data-site-spacing={content.appearance.spacing} style={style}>
+        {children}
+      </div>
+    </SiteContentContext.Provider>
+  );
+}
+
+export function getSiteAppearanceStyle(content: SiteContent): CSSProperties {
   const hex = content.appearance.brandColor;
   const rgb = [1, 3, 5].map((offset) => parseInt(hex.slice(offset, offset + 2), 16) / 255);
   const luminance = rgb.map((channel) =>
@@ -33,7 +45,7 @@ export function SiteContentProvider({
     0.2126 * luminance[0]! + 0.7152 * luminance[1]! + 0.0722 * luminance[2]! > 0.179
       ? "#191d21"
       : "#ffffff";
-  const style = {
+  return {
     "--brand": hex,
     "--primary": hex,
     "--ring": hex,
@@ -47,17 +59,14 @@ export function SiteContentProvider({
           : "0.375rem",
     "--site-width": content.appearance.width === "wide" ? "96rem" : "80rem",
   } as CSSProperties;
-  return (
-    <SiteContentContext.Provider value={value}>
-      <div className="site-public" data-site-spacing={content.appearance.spacing} style={style}>
-        {children}
-      </div>
-    </SiteContentContext.Provider>
-  );
 }
 
 export function useSiteContent() {
   return useContext(SiteContentContext);
+}
+
+export function usePublicSiteTheme() {
+  return getSiteAppearanceStyle(useSiteContent().content);
 }
 
 /** Public settings are scoped to this render; the server's static defaults stay untouched. */
