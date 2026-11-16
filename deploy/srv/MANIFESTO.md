@@ -124,9 +124,14 @@ Em 05/10/2026: 537 sem foto, 219 deles com estoque. As fotos entram cadastradas 
 - Silencioso quando está tudo bem. 04:00 falhou e 06:40 deu certo → só log. **04:00 e 06:40 falharam** → alerta
   (chamado por `omie-sync.sh` depois da reserva). Verificação de hora em hora (`:17`, fora de 04–06 h): último sync
   válido há **mais de 26 h** → alerta. No máximo um alerta a cada 20 h; também acende o aviso do login SSH.
-- Configurar: criar um bot no @BotFather, mandar uma mensagem a ele (ou adicioná-lo ao grupo), descobrir o chat id em
-  `https://api.telegram.org/bot<TOKEN>/getUpdates` e gravar (root, 600) `/opt/mag-site/secrets/alert.env`:
-  `TELEGRAM_BOT_TOKEN=...` e `TELEGRAM_CHAT_ID=...`. Testar: `/opt/mag-site/bin/omie-alert.py teste`.
+- Configurar (desde 16/11/2026, só na VPS, como root, num terminal): criar o bot no @BotFather, adicioná-lo ao grupo
+  dos alertas e rodar `deploy/bin/telegram-configurar.py` da release. O token é digitado sem eco (nunca em chat,
+  endereço aberto no navegador, argumento de comando ou log); o número do grupo é descoberto pela API mostrando só o
+  identificador; `/opt/mag-site/secrets/alert.env` (pasta 700, arquivo root:root 600) é gravado de forma atômica com
+  `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID`, e sai uma mensagem de teste. `--chat-id` só mostra o número, com o token
+  já gravado. Testar: `/opt/mag-site/bin/omie-alert.py teste` e o ciclo do alerta do servidor (alerta, lembrete,
+  recuperação; problema fictício e estado temporário): `/opt/mag-site/bin/saude-host.py --testar-alertas`.
+  Telegram fora do ar não para nada: cada script registra só o tipo do erro (nunca a URL, que leva o token).
   Ver a mensagem sem enviar: `/opt/mag-site/bin/omie-alert.py reserva 1 --dry-run`.
 - Sem `alert.env` (situação em 05/10/2026) o alerta fica registrado no log e no aviso do login.
 - **Backup** (desde 05/10/2026): falha na geração (`backup.sh` ≠ 0), pacote não localizado, cópia externa ou hash →
@@ -595,7 +600,8 @@ diário) em `deploy/cms/` no código-fonte. Nunca reaproveitar nada do WordPress
 - Painel: 1º Admin criado em 06/10/2026 pelo bootstrap (`marketing@magmoveiscorporativos.com.br`) e 1 usuário DHO criado
   pelo painel (`dho@magmoveiscorporativos.com.br`); login, cookie seguro e permissões conferidos em produção. As senhas
   iniciais são temporárias: **trocar no 1º acesso** (Minha conta). Painel sem 2FA.
-- Telegram dos alertas (sync e backup): falta `secrets/alert.env` (token e chat). Até lá fica no log e no login SSH.
+- Telegram dos alertas (sync, backup, vigia do WhatsApp e saúde do servidor): falta `secrets/alert.env` (token e chat),
+  a configurar com `telegram-configurar.py` (ver "Alerta (Telegram)"). Até lá fica no log, no painel e no login SSH.
 - Reinício da VPS pendente (kernel 6.8.0-142 e libc6 instalados, não ativos) — ver `REBOOT.md`; antes dele, o backup
   manual do ERP VSB (seção própria no `REBOOT.md`; o ERP continua fora do backup diário).
 - CSP em observação (Report-Only) até 19/10–02/11/2026; depois decidir nonce e modo bloqueio com base no `mag-site-csp.log`.

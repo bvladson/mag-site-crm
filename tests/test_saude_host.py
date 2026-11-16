@@ -2,17 +2,22 @@
 
 python -m unittest tests/test_saude_host.py  (roda também no Windows: disco/carga ausentes viram "erros").
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from unittest import mock
 
 RAIZ = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import telegram_falso as tf  # noqa: E402
 
 
 def carregar(env):
@@ -42,13 +47,14 @@ class SaudeHostTest(unittest.TestCase):
             {"ok": False, "desde": 1763000000, "conferido": 1763000300, "motivo": "sessao FAILED no numero 5585998610074", "avisado": 1763000300}), encoding="utf-8")
         (base / "meminfo").write_text("MemTotal:  8000000 kB\nMemFree:  100000 kB\nMemAvailable:  2000000 kB\n", encoding="utf-8")
         self.saida = base / "dados/saude-host.json"
-        self.m = carregar({
+        self.env = {
             "MAG_SAUDE_SAIDA": str(self.saida), "MAG_SAUDE_SRV": str(base / "srv"), "MAG_SAUDE_LOGS": str(base / "log"),
             "MAG_SAUDE_FALHAS": str(base / "falhas"), "MAG_SAUDE_VIGIA": str(base / "vigia"),
             "MAG_SAUDE_MANUTENCAO": str(base / "manutencao-inexistente"),
             "MAG_SAUDE_ESTADO": str(base / "estado" / "alertas.json"),
             "MAG_SAUDE_ALERT_ENV": str(base / "alert-inexistente.env"),
-        })
+        }
+        self.m = carregar(self.env)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -156,6 +162,80 @@ class SaudeHostTest(unittest.TestCase):
         for passo in range(3):
             self.m.alertar(dados, agora + passo * 300, lambda texto: enviados.append(texto) or True)
         self.assertEqual(enviados, [])
+
+    def test_servicos_de_producao_continuam_monitorados(self):
+        """Todos os serviços de produção do compose continuam na coleta; os essenciais parados viram alerta."""
+        producao = ["mag-site-omie-consulta-1", "mag-site-omie-indice-1", "mag-site-omie-pedidos-1", "mag-site-omie-sync-1",
+                    "mag-site-social-sync-1", "mag-site-web-1", "mag-waha-waha-1"]
+        def docker(*args, **kwargs):
+            linhas = [f"{nome}|exited|Exited (1) 1 minute ago" for nome in producao]
+            linhas += ["mag-waha-stage-20261106-waha-1|exited|Exited (0) 4 days ago", "mag-site-hml-web-1|exited|Exited (0) 1 day ago"]
+            return subprocess.CompletedProcess(args, 0, stdout="\n".join(linhas), stderr="")
+        with mock.patch.object(self.m.subprocess, "run", docker):
+            containers = self.m.conteineres()
+        self.assertEqual([c["nome"] for c in containers], producao, "nenhum serviço de produção fica de fora")
+        criticos = self.m.problemas_criticos({"containers": containers, "backups": []}, time.time())
+        self.assertEqual(sorted(criticos), ["conteiner:mag-site-web-1", "conteiner:mag-waha-waha-1"],
+                         "site e WhatsApp parados são críticos; os de manutenção (omie-sync etc.) não")
+
+    def carregar_com_telegram(self, api, chat=tf.GRUPO):
+        env = self.base / "alert.env"
+        env.write_text(f"TELEGRAM_BOT_TOKEN={tf.TOKEN}\nTELEGRAM_CHAT_ID={chat}\n", encoding="utf-8")
+        return carregar({**self.env, "MAG_SAUDE_ALERT_ENV": str(env), "MAG_SAUDE_TELEGRAM_API": api})
+
+    def test_teste_do_ciclo_entrega_alerta_lembrete_e_recuperacao(self):
+        falso = tf.TelegramFalso()
+        try:
+            m = self.carregar_com_telegram(falso.url)
+            ok, linhas = m.testar_alertas()
+        finally:
+            falso.fechar()
+        self.assertTrue(ok, "\n".join(linhas))
+        self.assertEqual(falso.mensagens(), ["ALERTA MAG: " + m.TESTE_TEXTO, "Continua: " + m.TESTE_TEXTO, "Resolvido: " + m.TESTE_TEXTO],
+                         "um alerta, um lembrete depois de 6 h e a recuperação; nada repetido")
+        self.assertIn("3ª conferência (+10 min): nenhum envio (não repete)", linhas)
+        self.assertFalse((self.base / "estado" / "alertas.json").exists(), "o estado real dos alertas não muda")
+        self.assertFalse(self.saida.exists(), "o arquivo do painel não muda")
+
+    def test_telegram_indisponivel_nao_quebra_e_tenta_de_novo(self):
+        m = self.carregar_com_telegram(tf.porta_fechada())
+        erros = io.StringIO()
+        inicio = time.monotonic()
+        with contextlib.redirect_stderr(erros):
+            ok, linhas = m.testar_alertas()
+        self.assertLess(time.monotonic() - inicio, 60)
+        self.assertFalse(ok)
+        self.assertEqual(sum("alerta NÃO entregue" in linha for linha in linhas), 3, "tenta de novo a cada conferência")
+        self.assertFalse(any("recuperação" in linha for linha in linhas[:-1]), "sem 'Resolvido' de alerta que não chegou")
+        self.assertIn("Telegram falhou: URLError", erros.getvalue())
+        self.assertNotIn(tf.TOKEN, erros.getvalue() + "\n".join(linhas))
+        # Rotina normal do cron com o Telegram fora: o painel é gravado e o estado guarda o problema para avisar depois.
+        with mock.patch.object(m.subprocess, "run", self.docker), contextlib.redirect_stderr(io.StringIO()):
+            dados = m.coletar()
+            m.gravar(dados)
+            dados["disco"] = {"usoPct": 97, "livreGb": 1.0}
+            m.alertar(dados)
+            m.alertar(dados)
+        self.assertTrue(self.saida.exists(), "o arquivo do painel é gravado mesmo sem Telegram")
+        estado = json.loads((self.base / "estado" / "alertas.json").read_text(encoding="utf-8"))
+        self.assertIsNone(estado["disco"]["avisado"], "alerta não entregue fica pendente para a próxima conferência")
+
+    def test_telegram_recusado_mostra_so_o_codigo(self):
+        falso = tf.TelegramFalso()
+        try:
+            m = self.carregar_com_telegram(falso.url, chat=-1)
+            erros = io.StringIO()
+            with contextlib.redirect_stderr(erros):
+                self.assertFalse(m.enviar_telegram("ALERTA MAG: teste"))
+        finally:
+            falso.fechar()
+        self.assertIn("Telegram recusou (HTTP 400)", erros.getvalue())
+        self.assertNotIn(tf.TOKEN, erros.getvalue())
+
+    def test_sem_token_o_teste_do_ciclo_nao_envia(self):
+        ok, linhas = self.m.testar_alertas()
+        self.assertFalse(ok)
+        self.assertIn("não configurado", linhas[0])
 
     def test_docker_indisponivel_nao_derruba_a_coleta(self):
         def falha(*args, **kwargs):

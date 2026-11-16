@@ -143,6 +143,7 @@ def coletar():
 # Recursos da VPS, contêineres essenciais e backup que não rodou. Os outros alertas já existem: queda do WhatsApp
 # (vigia saude.py), falha do backup (backup-alerta.sh) e sincronização do Omie (omie-alert.py) — mesmo alert.env.
 ALERT_ENV = os.environ.get("MAG_SAUDE_ALERT_ENV", "/opt/mag-site/secrets/alert.env")
+TELEGRAM_API = os.environ.get("MAG_SAUDE_TELEGRAM_API", "https://api.telegram.org")  # trocado só nos testes
 ESTADO_ALERTAS = os.environ.get("MAG_SAUDE_ESTADO", "/var/lib/mag-site-saude/alertas.json")
 CONFIRMAR = 2            # conferências seguidas antes de avisar (evita alarme falso)
 LEMBRETE_S = 6 * 3600    # lembrete enquanto continuar
@@ -187,8 +188,15 @@ def ler_chaves(caminho, chaves):
     return valores
 
 
+def configurado():
+    chaves = ler_chaves(ALERT_ENV, ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"))
+    return bool(chaves.get("TELEGRAM_BOT_TOKEN") and chaves.get("TELEGRAM_CHAT_ID"))
+
+
 def enviar_telegram(texto):
-    """True se enviou. Sem alert.env (token ainda não cadastrado) não faz nada."""
+    """True se o Telegram confirmou. Sem alert.env (token ainda não cadastrado) não faz nada. Indisponível ou recusado:
+    False em no máximo 10 s, com só o tipo do erro no log (a URL leva o token e nunca é impressa)."""
+    import urllib.error
     import urllib.parse
     import urllib.request
     chaves = ler_chaves(ALERT_ENV, ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"))
@@ -197,23 +205,30 @@ def enviar_telegram(texto):
         return False
     corpo = urllib.parse.urlencode({"chat_id": chat, "text": texto[:3500], "disable_web_page_preview": "true"}).encode()
     try:
-        with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", corpo, timeout=10) as resposta:
+        with urllib.request.urlopen(f"{TELEGRAM_API}/bot{token}/sendMessage", corpo, timeout=10) as resposta:
             return resposta.status == 200
-    except Exception as erro:  # nunca imprime o token (está só na URL, que não vai para o log)
+    except urllib.error.HTTPError as erro:  # 401 = token errado; 400 = chat errado ou bot fora do grupo
+        print(f"[saude-host] Telegram recusou (HTTP {erro.code})", file=sys.stderr)
+        erro.close()
+        return False
+    except Exception as erro:  # rede, DNS, tempo esgotado
         print(f"[saude-host] Telegram falhou: {type(erro).__name__}", file=sys.stderr)
         return False
 
 
-def alertar(dados, agora=None, enviar=None):
-    """Compara com o estado salvo e avisa: novo problema (depois de CONFIRMAR conferências), lembrete e resolvido."""
+def alertar(dados, agora=None, enviar=None, problemas=None, estado_arquivo=None):
+    """Compara com o estado salvo e avisa: novo problema (depois de CONFIRMAR conferências), lembrete e resolvido.
+    Aviso não entregue fica sem "avisado" e é tentado de novo na conferência seguinte."""
     agora = agora if agora is not None else dt.datetime.now(dt.timezone.utc).timestamp()
     enviar = enviar or enviar_telegram
+    problemas = problemas or problemas_criticos
+    estado_arquivo = estado_arquivo or ESTADO_ALERTAS
     try:
-        with open(ESTADO_ALERTAS, encoding="utf-8") as f:
+        with open(estado_arquivo, encoding="utf-8") as f:
             estado = json.load(f)
     except (OSError, ValueError):
         estado = {}
-    atuais = problemas_criticos(dados, agora)
+    atuais = problemas(dados, agora)
     mensagens = []
     for chave, texto in atuais.items():
         item = estado.get(chave) or {"desde": agora, "contagem": 0, "avisado": None}
@@ -231,10 +246,56 @@ def alertar(dados, agora=None, enviar=None):
             texto = f"Resolvido: {item.get('texto', chave)}"
             enviar(texto)
             mensagens.append(texto)
-    os.makedirs(os.path.dirname(ESTADO_ALERTAS), exist_ok=True)
-    with open(ESTADO_ALERTAS, "w", encoding="utf-8") as f:
+    os.makedirs(os.path.dirname(estado_arquivo), exist_ok=True)
+    with open(estado_arquivo, "w", encoding="utf-8") as f:
         json.dump(estado, f)
     return mensagens
+
+
+TESTE_TEXTO = "[TESTE] simulação do alerta do servidor; nada está errado."
+TIPOS = {"ALERTA MAG: ": "alerta", "Continua: ": "lembrete", "Resolvido: ": "recuperação"}
+
+
+def testar_alertas(enviar=None, agora=None):
+    """Ciclo completo com um problema FICTÍCIO e relógio simulado, num estado TEMPORÁRIO: o estado real dos alertas e
+    o arquivo do painel não mudam. Envia de verdade pelo alert.env: alerta, lembrete (6 h) e recuperação, e confere
+    que não repete. Devolve (ok, linhas)."""
+    if enviar is None and not configurado():
+        return False, ["Telegram não configurado (alert.env sem token ou sem chat): nada foi enviado."]
+    enviar = enviar or enviar_telegram
+    t0 = agora if agora is not None else dt.datetime.now(dt.timezone.utc).timestamp()
+    problemas = lambda dados, _agora: {"teste": TESTE_TEXTO} if dados.get("ficticio") else {}
+    passos = (  # (rótulo, segundos desde o início, problema presente?, nota quando não envia)
+        ("1ª conferência (0 min)", 0, True, "confirma antes de avisar"),
+        ("2ª conferência (+5 min)", 300, True, ""),
+        ("3ª conferência (+10 min)", 600, True, "não repete"),
+        (f"+{LEMBRETE_S // 3600} h 05 min, problema continua", 300 + LEMBRETE_S, True, ""),
+        (f"+{LEMBRETE_S // 3600} h 10 min, problema resolvido", 600 + LEMBRETE_S, False, ""),
+    )
+    tentativas, linhas = [], ["Teste do alerta do servidor: problema FICTÍCIO, relógio simulado, estado temporário."]
+
+    def registrar(mensagem):
+        entregue = bool(enviar(mensagem))
+        tentativas.append((passo, next(t for p, t in TIPOS.items() if mensagem.startswith(p)), entregue))
+        return entregue
+
+    with tempfile.TemporaryDirectory(prefix="mag-saude-teste-") as pasta:
+        estado = os.path.join(pasta, "alertas.json")
+        for passo, (rotulo, segundos, presente, nota) in enumerate(passos):
+            antes = len(tentativas)
+            alertar({"ficticio": presente}, t0 + segundos, registrar, problemas, estado)
+            novas = tentativas[antes:]
+            if not novas:
+                linhas.append(f"{rotulo}: nenhum envio" + (f" ({nota})" if nota else ""))
+            for _, tipo, entregue in novas:
+                linhas.append(f"{rotulo}: {tipo} " + ("entregue" if entregue else "NÃO entregue (Telegram indisponível ou recusou; a próxima conferência tenta de novo)"))
+    esperado = [(1, "alerta", True), (3, "lembrete", True), (4, "recuperação", True)]
+    ok = tentativas == esperado
+    entregues = [t for _, t, e in tentativas if e]
+    linhas.append(f"Resultado: {'OK' if ok else 'FALHOU'}: {len(entregues)} de 3 mensagens entregues"
+                  + (f" ({', '.join(entregues)})" if entregues else "")
+                  + ("" if ok else "; o painel e o resto do servidor não dependem do Telegram"))
+    return ok, linhas
 
 
 def gravar(dados):
@@ -252,6 +313,10 @@ def gravar(dados):
 
 
 if __name__ == "__main__":
+    if "--testar-alertas" in sys.argv:  # não coleta nem grava nada do servidor
+        resultado, saida = testar_alertas()
+        print("\n".join(saida))
+        sys.exit(0 if resultado else 1)
     dados = coletar()
     if "--imprimir" in sys.argv:
         print(json.dumps(dados, ensure_ascii=False, indent=2))
