@@ -26,12 +26,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-ALERT_ENV = os.environ.get("MAG_ALERT_ENV", "/opt/mag-site/secrets/alert.env")
-API = os.environ.get("MAG_TELEGRAM_API", "https://api.telegram.org")
+PADRAO_ENV = "/opt/mag-site/secrets/alert.env"
+PADRAO_API = "https://api.telegram.org"
+ALERT_ENV = os.environ.get("MAG_ALERT_ENV", PADRAO_ENV)  # só nos testes automáticos; o main() recusa outro valor
+API = os.environ.get("MAG_TELEGRAM_API", PADRAO_API)  # idem: fora dos testes, só a API oficial do Telegram
 CHAVES = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
 FORMATO_TOKEN = re.compile(r"^[0-9]{5,}:[A-Za-z0-9_-]{30,}$")
 TIPOS_GRUPO = ("group", "supergroup")
-TESTE = "✅ MAG — alertas do servidor configurados. Mensagem de teste: nada está errado."
+TESTE = ("✅ MAG CRM | Alertas — teste de comunicação concluído. O monitoramento da MAG está configurado para avisar "
+         "este grupo. Nada está errado.")
 
 
 class ErroTelegram(Exception):
@@ -219,6 +222,9 @@ def main(argumentos):
     if argumentos not in ([], ["--chat-id"]):
         print(__doc__)
         return 2
+    if (ALERT_ENV, API) != (PADRAO_ENV, PADRAO_API):
+        print("Variável de teste definida (MAG_ALERT_ENV ou MAG_TELEGRAM_API): recusado. Rode o comando sem ela.", file=sys.stderr)
+        return 2
     if hasattr(os, "geteuid") and os.geteuid() != 0:
         print("Rode como root: o alert.env é do root.", file=sys.stderr)
         return 2
@@ -230,6 +236,8 @@ def main(argumentos):
         print(f"{problema}. Nada foi feito.", file=sys.stderr)
         return 2
     escrever = lambda texto: print(texto, flush=True)
+    escrever(f"Conecta somente em {PADRAO_API} e grava somente {PADRAO_ENV} (root, 600). "
+             "O token não aparece na tela, não vai para log e não fica no histórico.")
     try:
         if argumentos == ["--chat-id"]:
             return mostrar_chat_id(escrever)

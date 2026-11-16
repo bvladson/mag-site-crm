@@ -3,7 +3,9 @@
 python -m unittest tests/test_telegram_configurar.py  (as permissões 600/root são conferidas só no Linux; como root
 também o dono root:root).
 """
+import contextlib
 import importlib.util
+import io
 import os
 import pathlib
 import stat
@@ -11,6 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 RAIZ = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -120,6 +123,19 @@ class ConfigurarTest(unittest.TestCase):
                         {"update_id": 2, "message": {"chat": {"id": -1004001, "type": "supergroup", "title": "G"}, "migrate_from_chat_id": -4001}}]
         self.assertEqual(list(tc.grupos(atualizacoes)), [-1004001])
         self.assertEqual(tc.grupos(tf.ATUALIZACOES), {tf.GRUPO: "Grupo dos Alertas"}, "privado fica fora")
+
+    def test_fora_dos_testes_so_aceita_a_api_oficial_e_o_arquivo_padrao(self):
+        for variavel, valor in (("MAG_TELEGRAM_API", self.falso.url), ("MAG_ALERT_ENV", str(self.arquivo))):
+            with mock.patch.dict(os.environ, {variavel: valor}):
+                outro = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(outro)
+            erros = io.StringIO()
+            with contextlib.redirect_stderr(erros), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(outro.main([]), 2, variavel)
+            self.assertIn("recusado", erros.getvalue())
+        self.assertEqual((tc.API, tc.ALERT_ENV), ("https://api.telegram.org", "/opt/mag-site/secrets/alert.env"))
+        self.assertEqual(self.falso.recebidas, [], "nada foi enviado a lugar nenhum")
+        self.assertFalse(self.arquivo.exists())
 
     @unittest.skipUnless(POSIX, "permissões POSIX")
     def test_recusa_pasta_aberta(self):
