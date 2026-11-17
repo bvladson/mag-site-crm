@@ -42,9 +42,11 @@ import {
   type Origin,
 } from "@/lib/crm";
 import { getOpportunityDetail, previewCrmQuoteLink } from "@/lib/crm.functions";
+import { REQUIRED_FIELD_LABEL, stageOf } from "@/lib/crm-pipelines";
 import { cn } from "@/lib/utils";
-import { proposalsFor, useCrm } from "./CrmProvider";
-import { NextActionLine, OriginBadge, ProposalBadge, StageBadge } from "./bits";
+import { proposalsFor, useCrm, type StageMoveFields } from "./CrmProvider";
+import { NextActionLine, OriginBadge, ProposalBadge } from "./bits";
+import { DaysInStage, OppStageBadge, useFunil } from "./funil-ui";
 import { MoveMenu } from "./OpportunityCard";
 import { dayKey, fullDate, localDateTime, money, toIsoDateTime } from "./format";
 
@@ -93,7 +95,7 @@ export function CrmDialogs() {
   const { dialog, close, opportunity, contact, entityLoading, entityError, refresh } = useCrm();
   const opportunityId =
     dialog &&
-    ["opportunity", "schedule", "loss", "close", "createProposal"].includes(dialog.kind) &&
+    ["opportunity", "schedule", "loss", "close", "createProposal", "requirements"].includes(dialog.kind) &&
     "id" in dialog
       ? dialog.id
       : undefined;
@@ -147,6 +149,7 @@ export function CrmDialogs() {
       <ScheduleDialog />
       <LossDialog />
       <CloseDialog />
+      <RequirementsDialog />
       <NewOpportunityDialog />
       <ContactDialog />
       <CreateProposalDialog />
@@ -170,8 +173,10 @@ function OpportunityDrawer() {
     units,
   } = useCrm();
   const navigate = useNavigate();
+  const { pipelineOf } = useFunil();
   const current = dialog?.kind === "opportunity" ? opportunity(dialog.id) : undefined;
   const customer = current ? contact(current.contactId) : undefined;
+  const currentPipeline = current ? pipelineOf(current) : undefined;
   const [notes, setNotes] = useState("");
   const [title, setTitle] = useState("");
   const [interest, setInterest] = useState("");
@@ -209,15 +214,19 @@ function OpportunityDrawer() {
         {current && customer && (
           <>
             <SheetHeader className="pr-7 text-left">
-              <div className="flex flex-wrap gap-1.5">
-                <StageBadge stage={current.stage} />
+              <div className="flex flex-wrap items-center gap-1.5">
+                <OppStageBadge opp={current} />
                 <OriginBadge origin={current.origin} />
+                {currentPipeline && (
+                  <span className="text-xs text-muted-foreground">Funil {currentPipeline.name}</span>
+                )}
               </div>
               <SheetTitle className="text-xl">{current.title}</SheetTitle>
               <SheetDescription>
                 {customer.name}
                 {customer.company && ` · ${customer.company}`}
               </SheetDescription>
+              <DaysInStage opp={current} />
             </SheetHeader>
             <div className="mt-6 space-y-6 text-sm">
               <div className="rounded-xl border bg-surface p-4">
@@ -597,8 +606,11 @@ function ScheduleDialog() {
   );
 }
 function LossDialog() {
-  const { dialog, close, opportunity, applyStage, busy } = useCrm();
-  const current = dialog?.kind === "loss" ? opportunity(dialog.id) : undefined;
+  const { dialog, close, opportunity, applyStage, applyStageMove, busy } = useCrm();
+  const { byId } = useFunil();
+  const target = dialog?.kind === "loss" ? dialog : undefined;
+  const current = target ? opportunity(target.id) : undefined;
+  const lostLabel = target?.stageId ? stageOf(byId.get(target.pipelineId ?? ""), target.stageId)?.label : undefined;
   const [reason, setReason] = useState<LossReason>();
   useEffect(() => setReason(undefined), [current?.id]);
   return (
@@ -623,14 +635,19 @@ function LossDialog() {
             onClick={async () => {
               if (!current || !reason) return;
               try {
-                await applyStage(current.id, "perdido", reason);
+                if (target?.stageId)
+                  await applyStageMove(current.id, target.stageId, {
+                    ...(target.pipelineId ? { pipelineId: target.pipelineId } : {}),
+                    lossReason: reason,
+                  });
+                else await applyStage(current.id, "perdido", reason);
                 close();
               } catch {
                 // O CRM apresenta a falha da ação e mantém o formulário aberto.
               }
             }}
           >
-            Registrar “Não fechou”
+            Registrar “{lostLabel ?? "Não fechou"}”
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -638,8 +655,11 @@ function LossDialog() {
   );
 }
 function CloseDialog() {
-  const { dialog, close, opportunity, applyStage, busy } = useCrm();
-  const current = dialog?.kind === "close" ? opportunity(dialog.id) : undefined;
+  const { dialog, close, opportunity, applyStage, applyStageMove, busy } = useCrm();
+  const { byId } = useFunil();
+  const target = dialog?.kind === "close" ? dialog : undefined;
+  const current = target ? opportunity(target.id) : undefined;
+  const wonLabel = target?.stageId ? stageOf(byId.get(target.pipelineId ?? ""), target.stageId)?.label : undefined;
   return (
     <Dialog
       open={Boolean(current)}
@@ -649,7 +669,7 @@ function CloseDialog() {
     >
       <DialogContent className="mag-crm mag-crm-dialog">
         <DialogHeader>
-          <DialogTitle>Marcar como Fechado?</DialogTitle>
+          <DialogTitle>Marcar como {wonLabel ?? "Fechado"}?</DialogTitle>
           <DialogDescription>{current?.title}</DialogDescription>
         </DialogHeader>
         <div className="crm-warning flex gap-3 rounded-xl border p-4 text-sm">
@@ -668,7 +688,11 @@ function CloseDialog() {
             onClick={async () => {
               if (!current) return;
               try {
-                await applyStage(current.id, "fechado");
+                if (target?.stageId)
+                  await applyStageMove(current.id, target.stageId, {
+                    ...(target.pipelineId ? { pipelineId: target.pipelineId } : {}),
+                  });
+                else await applyStage(current.id, "fechado");
                 close();
               } catch {
                 // O CRM apresenta a falha da ação e mantém o formulário aberto.
@@ -678,6 +702,132 @@ function CloseDialog() {
             Sim, negociação fechada
           </Button>
         </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+/** Etapa 4: o que falta para entrar na etapa. Grava os campos e move no mesmo passo (o servidor confere de novo). */
+function RequirementsDialog() {
+  const { dialog, close, opportunity, applyStageMove, busy } = useCrm();
+  const { byId } = useFunil();
+  const target = dialog?.kind === "requirements" ? dialog : undefined;
+  const current = target ? opportunity(target.id) : undefined;
+  const stage = target ? stageOf(byId.get(target.pipelineId), target.stageId) : undefined;
+  const missing = target?.missing ?? [];
+  const [value, setValue] = useState("");
+  const [action, setAction] = useState("");
+  const [due, setDue] = useState("");
+  const [notes, setNotes] = useState("");
+  useEffect(() => {
+    setValue(current?.estimatedValueCents ? (current.estimatedValueCents / 100).toFixed(2) : "");
+    setAction(current?.nextAction.label ?? "");
+    setDue(localDateTime(new Date(Date.now() + 24 * 60 * 60_000).toISOString()));
+    setNotes(current?.notes ?? "");
+  }, [current?.id, target?.stageId]);
+  const amount = value ? Number(value.replace(",", ".")) : NaN;
+  const ready =
+    (!missing.includes("value") || (Number.isFinite(amount) && amount > 0)) &&
+    (!missing.includes("nextAction") || (action.trim() && due)) &&
+    (!missing.includes("notes") || notes.trim());
+  return (
+    <Dialog
+      open={Boolean(current && stage)}
+      onOpenChange={(open) => {
+        if (!open) close();
+      }}
+    >
+      <DialogContent className="mag-crm mag-crm-dialog">
+        <DialogHeader>
+          <DialogTitle>Para entrar em “{stage?.label}”</DialogTitle>
+          <DialogDescription>
+            Esta etapa pede {missing.map((field) => REQUIRED_FIELD_LABEL[field].toLowerCase()).join(", ")}. Preencha para
+            mover “{current?.title}”.
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          className="space-y-4"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            if (!current || !target || !ready) return;
+            const fields: StageMoveFields = {};
+            if (missing.includes("value")) fields.estimatedValueCents = Math.round(amount * 100);
+            if (missing.includes("nextAction")) fields.nextAction = { label: action.trim(), due: toIsoDateTime(due) };
+            if (missing.includes("notes")) fields.notes = notes.trim();
+            try {
+              await applyStageMove(current.id, target.stageId, { pipelineId: target.pipelineId, fields });
+              close();
+            } catch {
+              // O CRM apresenta a falha da ação e mantém o formulário aberto.
+            }
+          }}
+        >
+          {missing.includes("value") && (
+            <div className="space-y-1.5">
+              <Label htmlFor="crm-req-value">Valor estimado (R$)</Label>
+              <Input
+                id="crm-req-value"
+                inputMode="decimal"
+                type="number"
+                min="0.01"
+                step="0.01"
+                required
+                value={value}
+                disabled={busy}
+                onChange={(event) => setValue(event.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">Uma proposta vinculada válida também conta como valor.</p>
+            </div>
+          )}
+          {missing.includes("nextAction") && (
+            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+              <div className="space-y-1.5">
+                <Label htmlFor="crm-req-action">Próxima ação</Label>
+                <Input
+                  id="crm-req-action"
+                  required
+                  maxLength={240}
+                  value={action}
+                  disabled={busy}
+                  placeholder="Ex.: Enviar proposta revisada"
+                  onChange={(event) => setAction(event.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="crm-req-due">Quando</Label>
+                <Input
+                  id="crm-req-due"
+                  type="datetime-local"
+                  required
+                  value={due}
+                  disabled={busy}
+                  onChange={(event) => setDue(event.target.value)}
+                />
+              </div>
+            </div>
+          )}
+          {missing.includes("notes") && (
+            <div className="space-y-1.5">
+              <Label htmlFor="crm-req-notes">Observações</Label>
+              <Textarea
+                id="crm-req-notes"
+                required
+                rows={3}
+                maxLength={5000}
+                value={notes}
+                disabled={busy}
+                onChange={(event) => setNotes(event.target.value)}
+              />
+            </div>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="ghost" disabled={busy} onClick={close}>
+              Cancelar
+            </Button>
+            <Button type="submit" disabled={busy || !ready}>
+              Salvar e mover
+            </Button>
+          </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   );

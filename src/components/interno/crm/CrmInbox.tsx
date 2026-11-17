@@ -30,7 +30,8 @@ import {
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import { proposalsFor, useCrm } from "./CrmProvider";
-import { Avatar, EmptyState, NextActionLine, OriginBadge, ProposalBadge, StageBadge } from "./bits";
+import { Avatar, EmptyState, NextActionLine, OriginBadge, ProposalBadge } from "./bits";
+import { OppStageBadge } from "./funil-ui";
 import { money } from "./format";
 import { getCrmConversationPage, getCrmContactsPage } from "@/lib/crm.functions";
 import { Loading } from "@/components/interno/ui";
@@ -686,7 +687,7 @@ function Chat({
               type="button"
               size="sm"
               variant="outline"
-              className="rounded-full bg-white shadow-sm"
+              className="rounded-full bg-card shadow-sm"
               disabled={history.isFetchingNextPage}
               onClick={async () => {
                 const element = historyElement.current;
@@ -715,7 +716,7 @@ function Chat({
         {history.isError && (
           <p
             role="alert"
-            className="mx-auto mt-2 max-w-md rounded-md border border-destructive/30 bg-white p-3 text-sm text-destructive"
+            className="mx-auto mt-2 max-w-md rounded-md border border-destructive/30 bg-card p-3 text-sm text-destructive"
           >
             Não foi possível atualizar as mensagens.{" "}
             <button type="button" className="underline" onClick={() => void history.refetch()}>
@@ -740,7 +741,7 @@ function Chat({
             ))}
           </div>
         ) : !history.isLoading && !history.isError ? (
-          <div className="mx-auto mt-6 max-w-md rounded-xl bg-white/90 py-8 shadow-sm">
+          <div className="mx-auto mt-6 max-w-md rounded-xl bg-card/90 py-8 shadow-sm">
             <EmptyState
               icon={MessageCircle}
               title="Nenhuma mensagem registrada"
@@ -898,7 +899,7 @@ function Chat({
         {sendError && (
           <p
             role="alert"
-            className="mt-2 rounded-md border border-destructive/30 bg-white p-2 text-xs text-destructive"
+            className="mt-2 rounded-md border border-destructive/30 bg-card p-2 text-xs text-destructive"
           >
             {sendError}
           </p>
@@ -961,7 +962,7 @@ function ClientCard({ contactId }: { contactId: string }) {
             className="w-full space-y-2 rounded-xl border p-3 text-left hover:bg-accent"
           >
             <div className="flex flex-wrap gap-1.5">
-              <StageBadge stage={item.stage} />
+              <OppStageBadge opp={item} />
               <OriginBadge origin={item.origin} />
             </div>
             <p className="font-medium">{item.title}</p>

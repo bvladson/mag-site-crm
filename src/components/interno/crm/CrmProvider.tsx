@@ -28,17 +28,34 @@ import {
   markConversationRead,
 } from "@/lib/crm.functions";
 import { getCrmConnection, sendCrmMessage } from "@/lib/crm-integrations.functions";
+import { moveOpportunityStage } from "@/lib/crm-funil.functions";
+import {
+  knownValueCents,
+  missingRequired,
+  stageIdForLegacy,
+  stageOf,
+  type RequiredField,
+} from "@/lib/crm-pipelines";
 import { ErrorState, Loading, useMe } from "@/components/interno/ui";
 import type { WahaRecovery } from "./WahaLinePanel";
 
 export type CrmDialog =
   | {
-      kind: "opportunity" | "schedule" | "loss" | "close" | "createProposal" | "proposal";
+      kind: "opportunity" | "schedule" | "createProposal" | "proposal";
       id: string;
     }
+  /** Perda e ganho: com `stageId`, a etapa de perda/ganho do funil do negócio (Etapa 4). */
+  | { kind: "loss" | "close"; id: string; stageId?: string; pipelineId?: string }
+  /** Campos obrigatórios para entrar na etapa (conferidos de novo no servidor). */
+  | { kind: "requirements"; id: string; stageId: string; pipelineId: string; missing: RequiredField[] }
   | { kind: "newOpportunity"; contactId?: string }
   | { kind: "contact"; id?: string }
   | null;
+export interface StageMoveFields {
+  estimatedValueCents?: number;
+  notes?: string;
+  nextAction?: { label: string; due: string };
+}
 const QUERY_KEY = ["interno", "crm"] as const;
 interface CrmStore extends CrmBootstrap {
   viewerId: string;
@@ -93,6 +110,13 @@ interface CrmStore extends CrmBootstrap {
   opportunity: (id: string) => Opportunity | undefined;
   requestMove: (id: string, stage: Stage) => Promise<void>;
   applyStage: (id: string, stage: Stage, lossReason?: LossReason) => Promise<void>;
+  /** Etapa 4: pede o movimento para uma etapa do funil (abre perda, ganho ou obrigatórios quando preciso). */
+  requestMoveStage: (id: string, stageId: string, pipelineId?: string) => Promise<void>;
+  applyStageMove: (
+    id: string,
+    stageId: string,
+    options?: { pipelineId?: string; lossReason?: LossReason; fields?: StageMoveFields },
+  ) => Promise<void>;
   schedule: (id: string, label: string, due: string) => Promise<void>;
   finishTask: (id: string) => Promise<void>;
   addOpportunity: (input: {
@@ -157,6 +181,7 @@ export function CrmProvider({ children }: { children: ReactNode }) {
   const addOpp = useServerFn(createOpportunity);
   const editOpp = useServerFn(updateOpportunity);
   const move = useServerFn(moveOpportunity);
+  const moveStage = useServerFn(moveOpportunityStage);
   const schedule = useServerFn(scheduleTask);
   const complete = useServerFn(completeTask);
   const importLead = useServerFn(importSiteLead);
@@ -185,7 +210,7 @@ export function CrmProvider({ children }: { children: ReactNode }) {
     : undefined;
   const dialogOpportunityId =
     dialog &&
-    ["opportunity", "schedule", "loss", "close", "createProposal"].includes(dialog.kind) &&
+    ["opportunity", "schedule", "loss", "close", "createProposal", "requirements"].includes(dialog.kind) &&
     "id" in dialog
       ? dialog.id
       : undefined;
@@ -301,6 +326,53 @@ export function CrmProvider({ children }: { children: ReactNode }) {
       "Etapa atualizada",
     );
   };
+  const pipelineMap = new Map((data.pipelines ?? []).map((item) => [item.id, item]));
+  const applyStageMove: CrmStore["applyStageMove"] = async (id, stageId, options = {}) => {
+    const current = requireOpportunity(id);
+    await run(
+      () =>
+        moveStage({
+          data: {
+            id,
+            revision: current.revision,
+            stageId,
+            ...(options.pipelineId ? { pipelineId: options.pipelineId } : {}),
+            ...(options.lossReason ? { lossReason: options.lossReason } : {}),
+            ...(options.fields ? { fields: options.fields } : {}),
+          },
+        }),
+      "Etapa atualizada",
+    );
+  };
+  const requestMoveStage: CrmStore["requestMoveStage"] = async (id, stageId, pipelineId) => {
+    const current = opportunity(id);
+    if (!current || busy) return;
+    const pipeline = pipelineMap.get(pipelineId || current.pipelineId || "");
+    const stage = stageOf(pipeline, stageId);
+    if (!pipeline || !stage) {
+      toast.error("Etapa indisponível. Atualize a página.");
+      return;
+    }
+    if (pipeline.id === current.pipelineId && stage.id === current.stageId) return;
+    if (stage.kind === "lost") {
+      setDialog({ kind: "loss", id, stageId: stage.id, pipelineId: pipeline.id });
+      return;
+    }
+    // Conferência antecipada só para abrir o diálogo certo; o servidor confere de novo ao gravar.
+    const missing = missingRequired(
+      { valueCents: knownValueCents(current, data.proposals), nextActionLabel: current.nextAction.label, notes: current.notes },
+      stage,
+    );
+    if (missing.length) {
+      setDialog({ kind: "requirements", id, stageId: stage.id, pipelineId: pipeline.id, missing });
+      return;
+    }
+    if (stage.kind === "won") {
+      setDialog({ kind: "close", id, stageId: stage.id, pipelineId: pipeline.id });
+      return;
+    }
+    await applyStageMove(id, stage.id, { pipelineId: pipeline.id });
+  };
   const store: CrmStore = {
     ...data,
     viewerId: me.data?.id ?? "",
@@ -330,12 +402,21 @@ export function CrmProvider({ children }: { children: ReactNode }) {
     opportunity,
     requestMove: async (id, stage) => {
       const current = opportunity(id);
-      if (!current || current.stage === stage || busy) return;
+      if (!current || busy) return;
+      const pipeline = pipelineMap.get(current.pipelineId ?? "");
+      if (pipeline) {
+        // Etapa 4: a categoria vira a etapa correspondente do funil do negócio (com obrigatórios, perda e ganho).
+        await requestMoveStage(id, stageIdForLegacy(pipeline, stage), pipeline.id);
+        return;
+      }
+      if (current.stage === stage) return;
       if (stage === "perdido") setDialog({ kind: "loss", id });
       else if (stage === "fechado") setDialog({ kind: "close", id });
       else await applyStage(id, stage);
     },
     applyStage,
+    requestMoveStage,
+    applyStageMove,
     schedule: async (id, label, due) => {
       await run(() => schedule({ data: { opportunityId: id, label, due } }), "Retorno agendado");
     },

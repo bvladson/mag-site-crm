@@ -1,8 +1,49 @@
+import { useEffect } from "react";
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
-import { Home, KanbanSquare, MessageCircle, Users, FileText, Plug, Loader2 } from "lucide-react";
+import { Home, KanbanSquare, MessageCircle, Users, FileText, Plug, Loader2, Monitor, Moon, Sun } from "lucide-react";
 import { CrmProvider, useCrm } from "./CrmProvider";
 import { CrmDialogs } from "./CrmDialogs";
+import { useStoredState } from "./funil-ui";
 import "./Crm.css";
+
+const THEMES = [
+  ["light", "Claro", Sun],
+  ["dark", "Escuro", Moon],
+  ["system", "Igual ao sistema", Monitor],
+] as const;
+type Theme = (typeof THEMES)[number][0];
+/**
+ * Tema do CRM (Etapa 4): marcado em <html data-crm-theme> só enquanto o CRM está aberto, porque as janelas e menus
+ * do CRM abrem fora desta área. As cores escuras valem só dentro de `.mag-crm`; ao sair do CRM, a marca é retirada.
+ */
+function ThemeControl() {
+  const [theme, setTheme] = useStoredState<Theme>("mag-crm-tema", "light", ["light", "dark", "system"]);
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      const dark = theme === "dark" || (theme === "system" && media.matches);
+      document.documentElement.dataset["crmTheme"] = dark ? "dark" : "light";
+    };
+    apply();
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, [theme]);
+  useEffect(
+    () => () => {
+      delete document.documentElement.dataset["crmTheme"];
+    },
+    [],
+  );
+  return (
+    <div className="crm-theme" role="group" aria-label="Tema do CRM">
+      {THEMES.map(([value, label, Icon]) => (
+        <button key={value} type="button" aria-pressed={theme === value} aria-label={`Tema: ${label}`} title={label} onClick={() => setTheme(value)}>
+          <Icon />
+        </button>
+      ))}
+    </div>
+  );
+}
 
 const NAV = [
   { to: "/interno/crm", label: "Meu dia", icon: Home },
@@ -45,10 +86,11 @@ function Workspace() {
             <span>Integrações</span>
           </Link>
         )}
+        <ThemeControl />
         {busy && (
           <span
             role="status"
-            className="ml-auto flex items-center gap-1 px-2 text-xs text-muted-foreground"
+            className="flex items-center gap-1 px-2 text-xs text-muted-foreground"
           >
             <Loader2 className="size-3 animate-spin" />
             Salvando…

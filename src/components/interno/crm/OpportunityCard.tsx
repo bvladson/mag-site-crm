@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { MoreHorizontal } from "lucide-react";
 import { STAGES, type Opportunity } from "@/lib/crm";
+import { openStages } from "@/lib/crm-pipelines";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -12,10 +13,71 @@ import {
 import { cn } from "@/lib/utils";
 import { latestValue, useCrm } from "./CrmProvider";
 import { AwaitingDot, LastSeen, NextActionLine, OriginBadge } from "./bits";
+import { DaysInStage, StageDot, useFunil } from "./funil-ui";
 import { money } from "./format";
 
-export function MoveMenu({ opp, trigger }: { opp: Opportunity; trigger: ReactNode }) {
-  const { requestMove, open, busy } = useCrm();
+export function MoveMenu({
+  opp,
+  trigger,
+  readOnly,
+}: {
+  opp: Opportunity;
+  trigger: ReactNode;
+  readOnly?: boolean | undefined;
+}) {
+  const { requestMove, requestMoveStage, open, busy } = useCrm();
+  const { pipelines, pipelineOf } = useFunil();
+  const pipeline = pipelineOf(opp);
+  if (pipeline)
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className="mag-crm w-64"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <DropdownMenuLabel className="truncate">Mover para · {pipeline.name}</DropdownMenuLabel>
+          {pipeline.stages.map((stage) => (
+            <DropdownMenuItem
+              key={stage.id}
+              disabled={readOnly || busy || opp.stageId === stage.id}
+              onSelect={() => {
+                void requestMoveStage(opp.id, stage.id, pipeline.id).catch(() => {});
+              }}
+            >
+              <StageDot color={stage.color} />
+              {stage.label}
+              {stage.kind === "lost" && "…"}
+            </DropdownMenuItem>
+          ))}
+          {pipelines.length > 1 && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel>Levar para outro funil</DropdownMenuLabel>
+              {pipelines
+                .filter((item) => item.id !== pipeline.id)
+                .map((item) => (
+                  <DropdownMenuItem
+                    key={item.id}
+                    disabled={readOnly || busy}
+                    onSelect={() => {
+                      const first = openStages(item)[0];
+                      if (first) void requestMoveStage(opp.id, first.id, item.id).catch(() => {});
+                    }}
+                  >
+                    {item.name}
+                  </DropdownMenuItem>
+                ))}
+            </>
+          )}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem disabled={readOnly || busy} onSelect={() => open({ kind: "schedule", id: opp.id })}>
+            Agendar retorno
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
@@ -52,7 +114,17 @@ export function MoveMenu({ opp, trigger }: { opp: Opportunity; trigger: ReactNod
     </DropdownMenu>
   );
 }
-export function OpportunityCard({ opp, draggable }: { opp: Opportunity; draggable?: boolean }) {
+export function OpportunityCard({
+  opp,
+  draggable,
+  readOnly,
+  showOwner,
+}: {
+  opp: Opportunity;
+  draggable?: boolean | undefined;
+  readOnly?: boolean | undefined;
+  showOwner?: boolean | undefined;
+}) {
   const { contact, open, proposals, busy, units } = useCrm();
   const customer = contact(opp.contactId);
   const value =
@@ -62,7 +134,7 @@ export function OpportunityCard({ opp, draggable }: { opp: Opportunity; draggabl
     <div
       role="button"
       tabIndex={0}
-      draggable={draggable && !busy}
+      draggable={draggable && !busy && !readOnly}
       data-crm-opportunity={opp.id}
       onDragStart={(event) => {
         event.dataTransfer.setData("text/plain", opp.id);
@@ -89,6 +161,7 @@ export function OpportunityCard({ opp, draggable }: { opp: Opportunity; draggabl
         </div>
         <MoveMenu
           opp={opp}
+          readOnly={readOnly}
           trigger={
             <button
               type="button"
@@ -114,9 +187,12 @@ export function OpportunityCard({ opp, draggable }: { opp: Opportunity; draggabl
         <p className="mt-2.5 text-base font-semibold tabular-nums">{money(value)}</p>
       )}
       <p className="mt-2 text-[11px] text-muted-foreground">
-        {opp.ownerName}
+        {showOwner === false ? null : opp.ownerName}
         {opp.unitId && ` · ${units.find((unit) => unit.id === opp.unitId)?.name ?? "Unidade"}`}
       </p>
+      <div className="mt-1">
+        <DaysInStage opp={opp} />
+      </div>
       <div className="mt-2.5 border-t pt-2.5">
         <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
           Próxima ação

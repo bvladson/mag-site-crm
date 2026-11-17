@@ -29,7 +29,7 @@
   gap: 0.25rem;
   flex-wrap: wrap;
   border-bottom: 1px solid var(--border);
-  background: white;
+  background: var(--card);
   padding: 0.7rem 1rem;
 }
 .mag-crm-nav a {
@@ -44,7 +44,7 @@
 }
 .mag-crm-nav a[aria-current="page"] {
   color: var(--primary);
-  background: color-mix(in oklab, var(--primary) 8%, white);
+  background: color-mix(in oklab, var(--primary) 8%, var(--card));
 }
 .mag-crm-nav a:hover {
   background: var(--surface);
@@ -67,7 +67,7 @@
 }
 .mag-crm .crm-brand {
   color: var(--primary);
-  background: color-mix(in oklab, var(--primary) 8%, white);
+  background: color-mix(in oklab, var(--primary) 8%, var(--card));
 }
 .mag-crm .crm-card {
   box-shadow: 0 1px 3px rgb(21 48 67 / 0.06);
@@ -108,7 +108,7 @@
 }
 .mag-crm .crm-tab[aria-pressed="true"] {
   color: var(--primary);
-  background: color-mix(in oklab, var(--primary) 8%, white);
+  background: color-mix(in oklab, var(--primary) 8%, var(--card));
 }
 .mag-crm-dialog {
   max-height: calc(100dvh - 2rem);
@@ -127,7 +127,7 @@
   height: 1.75rem;
   display: grid;
   place-items: center;
-  background: white;
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: 50%;
 }
@@ -498,5 +498,121 @@
   }
   .mag-crm .wa-list-item {
     transition: none;
+  }
+}
+/* -----------------------------------------------------------------------------------------------
+   Etapa 4 (17/11/2026): cor "Grafite" das etapas e MODO ESCURO só do CRM. O tema é marcado em
+   <html data-crm-theme> enquanto as telas do CRM estão abertas (CrmWorkspace) e sai junto com elas.
+   Janelas, painéis e menus do CRM têm a classe .mag-crm, então mudam também. O site público e o
+   resto do painel não são afetados. Padrão: claro (o escuro é escolha de cada pessoa).
+   ----------------------------------------------------------------------------------------------- */
+.mag-crm .crm-ink {
+  color: var(--foreground);
+  background: color-mix(in oklab, var(--foreground) 10%, var(--card));
+}
+html[data-crm-theme="dark"] .mag-crm {
+  color-scheme: dark;
+  --background: #0e151d;
+  --surface: #121b24;
+  --foreground: #e3eaf1;
+  --card: #18222d;
+  --muted: #1e2a36;
+  --muted-foreground: #9aa9ba;
+  --border: #2a3846;
+  --input: #3a4957;
+  --popover: #18222d;
+  --popover-foreground: #e3eaf1;
+  --accent: #223140;
+  --accent-foreground: #e3eaf1;
+  --secondary: #223140;
+  --secondary-foreground: #e3eaf1;
+  --primary: #e0524a;
+  --primary-foreground: #ffffff;
+  --ring: #e0524a;
+  --destructive: #f07167;
+  --crm-info: #8db3ff;
+  --crm-info-soft: #1b2944;
+  --crm-warning: #f2bf68;
+  --crm-warning-soft: #362a12;
+  --crm-success: #79d3a0;
+  --crm-success-soft: #153224;
+  --wa-out: #144d37;
+  --wa-in: #1f2c34;
+  --wa-wallpaper: #0b141a;
+  --wa-header: #1b252d;
+  --wa-green: #00a884;
+  --wa-green-dark: #21c29a;
+  --wa-tick: #53bdeb;
+  --wa-meta: #8c9ba5;
+  --wa-ink: #e9edef;
+  --wa-line: #25323b;
+}
+html[data-crm-theme="dark"] .mag-crm .crm-card {
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.45);
+}
+html[data-crm-theme="dark"] .mag-crm .crm-card:hover {
+  box-shadow: 0 6px 18px -8px rgb(0 0 0 / 0.7);
+}
+html[data-crm-theme="dark"] .mag-crm .crm-bubble-out {
+  background: #3a2326;
+}
+html[data-crm-theme="dark"] .mag-crm .wa-wallpaper {
+  background-blend-mode: multiply;
+}
+html[data-crm-theme="dark"] .mag-crm :is(.wa-list-item:hover, .wa-chip:hover) {
+  background: var(--wa-header);
+}
+html[data-crm-theme="dark"] .mag-crm .wa-filter-on {
+  background: #10352a;
+  border-color: #1f5a45;
+}
+html[data-crm-theme="dark"] .mag-crm :is(.wa-day span, .wa-input) {
+  background: #24323b;
+}
+html[data-crm-theme="dark"] .mag-crm :is(.wa-file, .wa-chip) {
+  background: var(--card);
+}
+html[data-crm-theme="dark"] .mag-crm .wa-bubble [data-crm-attachment] > a {
+  background: rgb(0 0 0 / 0.25);
+}
+html[data-crm-theme="dark"] .mag-crm .wa-link {
+  color: #53bdeb;
+}
+html[data-crm-theme="dark"] .mag-crm .wa-mono {
+  background: rgb(255 255 255 / 0.08);
+}
+html[data-crm-theme="dark"] .mag-crm .wa-notice {
+  background: #2c2917;
+  color: #d9d0a3;
+}
+.mag-crm .crm-theme {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 0.15rem;
+  margin-left: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.15rem;
+}
+.mag-crm .crm-theme button {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.35rem;
+  color: var(--muted-foreground);
+}
+.mag-crm .crm-theme button[aria-pressed="true"] {
+  color: var(--primary);
+  background: color-mix(in oklab, var(--primary) 10%, var(--card));
+}
+.mag-crm .crm-theme svg {
+  width: 1rem;
+  height: 1rem;
+}
+@media (max-width: 639px) {
+  .mag-crm .crm-theme button {
+    width: 2.75rem;
+    height: 2.75rem;
   }
 }

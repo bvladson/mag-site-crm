@@ -23,7 +23,8 @@ import {
 import { Loading } from "@/components/interno/ui";
 import { cn } from "@/lib/utils";
 import { useCrm } from "./CrmProvider";
-import { Avatar, EmptyState, NextActionLine, OriginBadge, StageBadge } from "./bits";
+import { Avatar, EmptyState, NextActionLine, OriginBadge } from "./bits";
+import { OppStageBadge } from "./funil-ui";
 import { fullDate, money } from "./format";
 import { ContactMatchHint, ContactSearch, ContactSearchPreparing } from "./ContactSearch";
 import { WahaContactsButton } from "./WahaContactsDialog";
@@ -361,7 +362,7 @@ function ClientDetail({ id, onBack }: { id: string; onBack: () => void }) {
                 className="crm-card space-y-2 rounded-xl border bg-card p-4 text-left"
               >
                 <div className="flex flex-wrap gap-1.5">
-                  <StageBadge stage={item.stage} />
+                  <OppStageBadge opp={item} />
                   <OriginBadge origin={item.origin} />
                 </div>
                 <p className="font-semibold">{item.title}</p>

@@ -12,7 +12,8 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useCrm } from "./CrmProvider";
-import { Avatar, EmptyState, LastSeen, NextActionLine, StageBadge } from "./bits";
+import { Avatar, EmptyState, LastSeen, NextActionLine } from "./bits";
+import { OppStageBadge } from "./funil-ui";
 import { fullDate, isDueTodayOrLate } from "./format";
 
 export function CrmDay() {
@@ -190,7 +191,7 @@ export function CrmDay() {
                     <div className="min-w-0 flex-1 space-y-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-semibold">{customer.name}</span>
-                        <StageBadge stage={item.stage} />
+                        <OppStageBadge opp={item} />
                         {(item.awaitingReply || unreadContacts.has(item.contactId)) && (
                           <span className="text-xs font-semibold text-primary">
                             Aguardando resposta
