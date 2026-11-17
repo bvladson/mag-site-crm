@@ -389,11 +389,12 @@ function PipelineEditor({
                   <span className="text-xs text-muted-foreground md:hidden">{index + 1}</span>
                 </div>
                 <div className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(0,1.4fr)_8rem_6rem_6rem_6rem]">
+                  <p className="text-xs font-medium text-muted-foreground sm:col-span-2 xl:col-span-5">
+                    {KIND_LABEL[item.kind]}
+                    {deals > 0 ? ` · ${deals} negócio(s)` : " · sem negócios"}
+                  </p>
                   <div className="space-y-1 sm:col-span-2 xl:col-span-1">
-                    <Label className="text-xs">
-                      Nome · {KIND_LABEL[item.kind]}
-                      {deals > 0 && ` · ${deals} negócio(s)`}
-                    </Label>
+                    <Label className="text-xs">Nome</Label>
                     <Input aria-label="Nome da etapa" maxLength={40} value={item.label} disabled={busy} onChange={(event) => patch(item.key, { label: event.target.value })} className="h-11 sm:h-9" />
                   </div>
                   <div className="space-y-1">
@@ -418,7 +419,7 @@ function PipelineEditor({
                     <Input aria-label="Limite de negócios" type="number" min={1} placeholder="—" value={item.wipLimit} disabled={busy || !isOpen} onChange={(event) => patch(item.key, { wipLimit: event.target.value })} className="h-11 sm:h-9" />
                   </div>
                   <div className="space-y-1">
-                    <Label className="text-xs">Parado após (dias)</Label>
+                    <Label className="text-xs">Parado (dias)</Label>
                     <Input aria-label="Dias até ficar parado" type="number" min={1} placeholder="—" value={item.staleDays} disabled={busy || !isOpen} onChange={(event) => patch(item.key, { staleDays: event.target.value })} className="h-11 sm:h-9" />
                   </div>
                   {item.kind !== "lost" && (

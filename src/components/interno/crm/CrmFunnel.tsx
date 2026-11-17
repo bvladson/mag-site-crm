@@ -407,13 +407,16 @@ export function CrmFunnel() {
 
           {tab !== "visao" && (
             <div className="flex items-center justify-between gap-2">
-              <span className="text-xs text-muted-foreground">
-                {(tab === "perdidos" ? lost : active).length} negócio(s)
-                {!canManage || readOnly ? " · carteira individual" : ""}
+              <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+                <span className="whitespace-nowrap">
+                  {(tab === "perdidos" ? lost : active).length} negócio(s)
+                  {!canManage || readOnly ? <span className="hidden sm:inline"> · carteira individual</span> : null}
+                </span>
                 {view === "list" && (
                   <button
                     type="button"
-                    className="ml-2 min-h-11 underline-offset-2 hover:underline sm:min-h-0"
+                    className="min-h-11 whitespace-nowrap rounded-md border bg-card px-2 sm:min-h-0 sm:py-1"
+                    aria-label={`Densidade da lista: ${density === "compact" ? "compacta" : "confortável"}. Tocar para trocar`}
                     onClick={() => setDensity(density === "compact" ? "comfortable" : "compact")}
                   >
                     {density === "compact" ? "Compacto" : "Confortável"}

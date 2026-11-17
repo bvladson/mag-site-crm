@@ -64,7 +64,10 @@ export function FunilVisao360({ onAdmin }: { onAdmin: () => void }) {
             })),
             now,
           );
-          const names = pipeline.sellers.map((id) => sellerById.get(id)?.name).filter(Boolean);
+          const names = pipeline.sellers
+            .map((id) => sellerById.get(id))
+            .filter((seller) => seller !== undefined)
+            .map((seller) => `${seller.name}${seller.active ? "" : " (inativo)"}`);
           return (
             <section key={pipeline.id} className="space-y-3 rounded-xl border bg-card p-4">
               <header className="flex items-start justify-between gap-2">
