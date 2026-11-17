@@ -31,6 +31,15 @@ import {
   type CrmContactSearchMatch,
   type CrmInboxView,
 } from "./crm.ts";
+import {
+  ensureFunilSchema,
+  opportunityValueCents,
+  placeNewOpportunity,
+  resolveMoveTarget,
+  visiblePipelinesFor,
+  type MoveTarget,
+} from "./crm-funil.server.ts";
+import { REQUIRED_FIELD_LABEL, missingRequired } from "./crm-pipelines.ts";
 
 type Row = Record<string, any>;
 const initialized = new WeakSet<object>();
@@ -145,6 +154,8 @@ export function ensureCrmSchema() {
       updated_at TEXT NOT NULL, PRIMARY KEY(provider,account,external_id)
     );
   `);
+  // Etapa 4: funis configuráveis (tabelas e colunas novas, migração idempotente; nada é apagado).
+  ensureFunilSchema(db);
   initialized.add(db);
   return db;
 }
@@ -459,6 +470,10 @@ function opportunityFromRow(r: Row): Opportunity {
     estimatedValueCents: r["estimated_value_cents"],
     sourceKind: r["source_kind"] || undefined,
     sourceId: r["source_id"] || undefined,
+    pipelineId: r["pipeline_id"] ?? null,
+    stageId: r["stage_id"] ?? null,
+    stageEnteredAt: r["stage_entered_at"] ?? null,
+    position: r["position"] == null ? null : Number(r["position"]),
   };
 }
 export function requireCrmOpportunity(actor: SiteUser, id: string): Opportunity {
@@ -618,6 +633,8 @@ function createOpportunityInternal(
       at,
       source?.at || at,
     );
+  // Etapa 4: funil padrão do dono, primeira etapa em andamento.
+  placeNewOpportunity(getDb(), id, contact.ownerId);
   event(id, null, "opportunity:created", "Oportunidade criada");
   return opportunityFromRow(
     getDb().prepare("SELECT * FROM crm_opportunities WHERE id=?").get(id) as Row,
@@ -692,6 +709,95 @@ export function updateOpportunity(actor: SiteUser, input: UpdateOpportunityInput
     return requireCrmOpportunity(actor, op.id);
   });
 }
+export interface MoveStageInput {
+  id: string;
+  revision: number;
+  pipelineId?: string | undefined;
+  stageId?: string | undefined;
+  lossReason?: LossReason | undefined;
+  /** Campos obrigatórios preenchidos no mesmo passo, pelo diálogo da tela. */
+  fields?:
+    | {
+        estimatedValueCents?: number | undefined;
+        notes?: string | undefined;
+        nextAction?: { label: string; due: string } | undefined;
+      }
+    | undefined;
+}
+/**
+ * Movimento único para todas as telas (funil, menu "Mover no funil", versão por categoria): grava os campos que o
+ * diálogo preencheu, confere os obrigatórios da etapa de destino com os dados já gravados, aplica o movimento com
+ * controle de versão e registra atividade + auditoria. Tudo numa transação.
+ */
+function applyStageMove(actor: SiteUser, op: Opportunity, target: MoveTarget, input: MoveStageInput) {
+  const db = getDb();
+  const lost = target.stage.kind === "lost";
+  if (lost && (!input.lossReason || !LOSS_REASONS.includes(input.lossReason))) throw new Error("Informe o motivo da perda");
+  const sameStage = target.pipeline.id === op.pipelineId && target.stage.id === op.stageId;
+  return atomic(() => {
+    const at = now();
+    const fields = input.fields ?? {};
+    if (fields.estimatedValueCents !== undefined) {
+      const amount = fields.estimatedValueCents;
+      if (!Number.isSafeInteger(amount) || amount < 0 || amount > 100_000_000_000) throw new Error("Valor estimado inválido");
+      db.prepare("UPDATE crm_opportunities SET estimated_value_cents=? WHERE id=?").run(amount, op.id);
+    }
+    if (fields.notes !== undefined) db.prepare("UPDATE crm_opportunities SET notes=? WHERE id=?").run(text(fields.notes, 5000), op.id);
+    if (fields.nextAction) {
+      const label = text(fields.nextAction.label, 240);
+      const due = new Date(fields.nextAction.due);
+      if (!label || !Number.isFinite(due.getTime())) throw new Error("Informe uma próxima ação e data válidas");
+      db.prepare("INSERT INTO crm_tasks(id,opportunity_id,label,due,created_at) VALUES(?,?,?,?,?)").run(randomUUID(), op.id, label, due.toISOString(), at);
+      event(op.id, actor.id, "task:scheduled", `Retorno agendado: ${label}`);
+    }
+    if (!sameStage) {
+      const row = db.prepare("SELECT notes FROM crm_opportunities WHERE id=?").get(op.id) as Row;
+      const next = db
+        .prepare("SELECT label FROM crm_tasks WHERE opportunity_id=? AND status='pending' ORDER BY due,id LIMIT 1")
+        .get(op.id) as Row | undefined;
+      const missing = missingRequired(
+        { valueCents: opportunityValueCents(db, op.id), nextActionLabel: next?.["label"], notes: row["notes"] },
+        target.stage,
+      );
+      if (missing.length)
+        throw new Error(`Para entrar em “${target.stage.label}”, preencha: ${missing.map((field) => REQUIRED_FIELD_LABEL[field]).join(", ")}`);
+    }
+    const result = db
+      .prepare(
+        "UPDATE crm_opportunities SET pipeline_id=?,stage_id=?,stage=?,stage_entered_at=CASE WHEN ?=1 THEN stage_entered_at ELSE ? END,position=CASE WHEN ?=1 THEN position ELSE ? END,loss_reason=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?",
+      )
+      .run(
+        target.pipeline.id,
+        target.stage.id,
+        target.legacy,
+        sameStage ? 1 : 0,
+        at,
+        sameStage ? 1 : 0,
+        target.position,
+        lost ? input.lossReason! : null,
+        at,
+        op.id,
+        input.revision,
+      );
+    if (!result.changes) throw new Error("Conflito: a oportunidade mudou. Atualize antes de mover");
+    if (!sameStage) {
+      const changedPipeline = target.fromPipeline?.id !== target.pipeline.id;
+      const from = target.fromStage
+        ? `${changedPipeline && target.fromPipeline ? `${target.fromPipeline.name} · ` : ""}${target.fromStage.label}`
+        : STAGE_LABEL[op.stage];
+      const to = `${changedPipeline ? `${target.pipeline.name} · ` : ""}${target.stage.label}`;
+      event(op.id, actor.id, "stage:changed", `${from} → ${to}${lost ? ` · ${input.lossReason}` : ""}`);
+      audit(actor.id, "crm:funil:movimento", op.id, {
+        funil: target.pipeline.id,
+        de: op.stageId ?? null,
+        para: target.stage.id,
+        categoria: target.legacy,
+      });
+    }
+    return requireCrmOpportunity(actor, op.id);
+  });
+}
+/** Versão por categoria (compatível com a tela anterior): vai para a etapa do funil que corresponde à categoria. */
 export function moveOpportunity(
   actor: SiteUser,
   input: { id: string; revision: number; stage: Stage; lossReason?: LossReason | undefined },
@@ -699,29 +805,16 @@ export function moveOpportunity(
   actor = guard(actor);
   const op = requireCrmOpportunity(actor, input.id);
   if (!(input.stage in STAGE_LABEL)) throw new Error("Etapa inválida");
-  if (input.stage === "perdido" && (!input.lossReason || !LOSS_REASONS.includes(input.lossReason)))
-    throw new Error("Informe o motivo da perda");
-  return atomic(() => {
-    const result = getDb()
-      .prepare(
-        "UPDATE crm_opportunities SET stage=?,loss_reason=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?",
-      )
-      .run(
-        input.stage,
-        input.stage === "perdido" ? input.lossReason! : null,
-        now(),
-        op.id,
-        input.revision,
-      );
-    if (!result.changes) throw new Error("Conflito: a oportunidade mudou. Atualize antes de mover");
-    event(
-      op.id,
-      actor.id,
-      "stage:changed",
-      `${STAGE_LABEL[op.stage]} → ${STAGE_LABEL[input.stage]}${input.stage === "perdido" ? ` · ${input.lossReason}` : ""}`,
-    );
-    return requireCrmOpportunity(actor, op.id);
-  });
+  const target = resolveMoveTarget(getDb(), op, { legacy: input.stage });
+  return applyStageMove(actor, op, target, { id: op.id, revision: input.revision, lossReason: input.lossReason });
+}
+/** Movimento para uma etapa do funil (e, se for o caso, para outro funil liberado para o dono do negócio). */
+export function moveOpportunityStage(actor: SiteUser, input: MoveStageInput) {
+  actor = guard(actor);
+  const op = requireCrmOpportunity(actor, input.id);
+  if (!input.stageId) throw new Error("Escolha a etapa");
+  const target = resolveMoveTarget(getDb(), op, { pipelineId: input.pipelineId, stageId: input.stageId });
+  return applyStageMove(actor, op, target, input);
 }
 function taskFromRow(r: Row): CrmTask {
   return {
@@ -1377,6 +1470,7 @@ export function getCrmBootstrap(actor: SiteUser): CrmBootstrap {
     ),
     awaitingContacts: Number(db.prepare(`SELECT count(*) n FROM crm_contacts c WHERE ${contactAttention} ${isAdmin(actor) ? "" : "AND c.owner_id=?"}`).get(...args)?.["n"]),
   };
+  const funnel = visiblePipelinesFor(actor);
   return {
     contacts,
     opportunities,
@@ -1384,6 +1478,8 @@ export function getCrmBootstrap(actor: SiteUser): CrmBootstrap {
     proposals: allProposals(actor),
     tasksDone,
     tasks,
+    pipelines: funnel.pipelines,
+    defaultPipelineId: funnel.defaultPipelineId,
     owners,
     units: listUnitsPublic().map((u) => ({ id: u.id, name: u.name })),
     canManage: isAdmin(actor),

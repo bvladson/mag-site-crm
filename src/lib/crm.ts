@@ -1,4 +1,5 @@
 /** Contratos do CRM MAG. Dados operacionais vêm exclusivamente do servidor. */
+import type { Pipeline } from "./crm-pipelines.ts";
 export type Stage = "novo" | "conversando" | "orcamento" | "fechado" | "perdido";
 export type Origin =
   "Anúncio Meta" | "Anúncio Google" | "Site" | "Indicação" | "WhatsApp" | "Desconhecida";
@@ -66,6 +67,11 @@ export interface Opportunity {
   estimatedValueCents: number;
   sourceKind?: string | undefined;
   sourceId?: string | undefined;
+  /** Etapa 4: funil e etapa personalizada. A categoria (usada pelas outras telas) continua em `stage`. */
+  pipelineId?: string | null | undefined;
+  stageId?: string | null | undefined;
+  stageEnteredAt?: string | null | undefined;
+  position?: number | null | undefined;
 }
 export interface Message {
   id: string;
@@ -201,6 +207,9 @@ export interface CrmBootstrap {
   siteLeads: SiteLead[];
   limits: { records: number; truncated: boolean };
   counts: { contacts: number; opportunities: number; unread: number; tasksPending: number; awaitingContacts?: number };
+  /** Etapa 4: funis liberados para quem está logado (administrador: todos) e o funil padrão dele. */
+  pipelines?: Pipeline[] | undefined;
+  defaultPipelineId?: string | null | undefined;
 }
 export interface CrmContactInput {
   name: string;
