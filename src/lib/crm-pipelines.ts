@@ -3,7 +3,9 @@
  *
  * Compatibilidade: `crm_opportunities.stage` continua sendo a CATEGORIA (novo | conversando | orcamento | fechado |
  * perdido) que as outras telas, as automações, as métricas e a versão anterior entendem. A etapa personalizada mora em
- * `stage_id`; a categoria é derivada dela pelo tipo e pela posição (mesmo adaptador do protótipo Lovable).
+ * `stage_id`, e cada etapa guarda a SUA categoria de forma explícita (ganho = fechado, perda = perdido, em andamento =
+ * escolhida pelo administrador). Incluir, reordenar ou excluir etapas nunca recalcula a categoria de ninguém; ela só
+ * muda quando o negócio muda de etapa ou quando o administrador troca, de propósito, a categoria de uma etapa.
  */
 import type { Stage } from "./crm.ts";
 
@@ -12,11 +14,15 @@ export type RequiredField = "value" | "nextAction" | "notes";
 export type StageColor = "info" | "warning" | "primary" | "success" | "muted" | "foreground";
 export type PipelineScope = "shared" | "specialized" | "personal";
 
+export type OpenCategory = Extract<Stage, "novo" | "conversando" | "orcamento">;
+
 export interface PipelineStage {
   id: string;
   label: string;
   color: StageColor;
   kind: StageKind;
+  /** Categoria fixa da etapa (a coluna antiga `stage` dos negócios nela). Não depende da posição. */
+  category: Stage;
   position: number;
   probability: number;
   wipLimit: number | null;
@@ -69,24 +75,34 @@ export const SCOPE_HELP: Record<PipelineScope, string> = {
   personal: "Funil de um único vendedor.",
 };
 export const KIND_LABEL: Record<StageKind, string> = { open: "Em andamento", won: "Ganho", lost: "Perdido" };
+export const OPEN_CATEGORIES: OpenCategory[] = ["novo", "conversando", "orcamento"];
+export const CATEGORY_LABEL: Record<Stage, string> = {
+  novo: "Novo",
+  conversando: "Conversando",
+  orcamento: "Orçamento enviado",
+  fechado: "Fechado",
+  perdido: "Não fechou",
+};
+export const isOpenCategory = (value: unknown): value is OpenCategory => OPEN_CATEGORIES.includes(value as OpenCategory);
+const categoryRank = (category: Stage) => OPEN_CATEGORIES.indexOf(category as OpenCategory);
 export const MAX_STAGES = 12;
 export const MAX_PIPELINES = 30;
 
 export type StageTemplate = Omit<PipelineStage, "id" | "position">;
 /** Funil "Vendas" criado na migração: as mesmas etapas que a produção usa hoje. */
 export const VENDAS_STAGES: StageTemplate[] = [
-  { label: "Novo", color: "info", kind: "open", probability: 10, wipLimit: null, staleDays: 2, requiredFields: [] },
-  { label: "Conversando", color: "warning", kind: "open", probability: 30, wipLimit: null, staleDays: 5, requiredFields: [] },
-  { label: "Orçamento enviado", color: "primary", kind: "open", probability: 60, wipLimit: null, staleDays: 7, requiredFields: [] },
-  { label: "Fechado", color: "success", kind: "won", probability: 100, wipLimit: null, staleDays: null, requiredFields: [] },
-  { label: "Não fechou", color: "muted", kind: "lost", probability: 0, wipLimit: null, staleDays: null, requiredFields: [] },
+  { label: "Novo", color: "info", kind: "open", category: "novo", probability: 10, wipLimit: null, staleDays: 2, requiredFields: [] },
+  { label: "Conversando", color: "warning", kind: "open", category: "conversando", probability: 30, wipLimit: null, staleDays: 5, requiredFields: [] },
+  { label: "Orçamento enviado", color: "primary", kind: "open", category: "orcamento", probability: 60, wipLimit: null, staleDays: 7, requiredFields: [] },
+  { label: "Fechado", color: "success", kind: "won", category: "fechado", probability: 100, wipLimit: null, staleDays: null, requiredFields: [] },
+  { label: "Não fechou", color: "muted", kind: "lost", category: "perdido", probability: 0, wipLimit: null, staleDays: null, requiredFields: [] },
 ];
 /** Funil novo criado pelo administrador. */
 export const NEW_PIPELINE_STAGES: StageTemplate[] = [
-  { label: "Novo", color: "info", kind: "open", probability: 10, wipLimit: null, staleDays: null, requiredFields: [] },
-  { label: "Em negociação", color: "warning", kind: "open", probability: 40, wipLimit: null, staleDays: null, requiredFields: [] },
-  { label: "Ganho", color: "success", kind: "won", probability: 100, wipLimit: null, staleDays: null, requiredFields: [] },
-  { label: "Perdido", color: "muted", kind: "lost", probability: 0, wipLimit: null, staleDays: null, requiredFields: [] },
+  { label: "Novo", color: "info", kind: "open", category: "novo", probability: 10, wipLimit: null, staleDays: null, requiredFields: [] },
+  { label: "Em negociação", color: "warning", kind: "open", category: "conversando", probability: 40, wipLimit: null, staleDays: null, requiredFields: [] },
+  { label: "Ganho", color: "success", kind: "won", category: "fechado", probability: 100, wipLimit: null, staleDays: null, requiredFields: [] },
+  { label: "Perdido", color: "muted", kind: "lost", category: "perdido", probability: 0, wipLimit: null, staleDays: null, requiredFields: [] },
 ];
 
 export const sortStages = (stages: PipelineStage[]) => {
@@ -99,8 +115,11 @@ export const openStages = (pipeline: Pipeline) => sortStages(pipeline.stages).fi
 export const wonStage = (pipeline: Pipeline) => pipeline.stages.find((stage) => stage.kind === "won");
 export const lostStage = (pipeline: Pipeline) => pipeline.stages.find((stage) => stage.kind === "lost");
 
-/** Categoria antiga de uma etapa: ganho → fechado, perdido → perdido, abertas pela posição. */
-export function legacyStageFor(pipeline: Pipeline, stageId: string | null | undefined): Stage {
+/**
+ * Categoria pela POSIÇÃO (primeira = novo, última = orçamento, do meio = conversando). Só serve para dar categoria,
+ * uma única vez, a etapas gravadas antes de a categoria existir; depois disso a posição nunca mais decide nada.
+ */
+export function positionalCategory(pipeline: Pipeline, stageId: string): Stage {
   const stage = stageOf(pipeline, stageId);
   if (!stage) return "novo";
   if (stage.kind === "won") return "fechado";
@@ -110,15 +129,35 @@ export function legacyStageFor(pipeline: Pipeline, stageId: string | null | unde
   if (index <= 0) return "novo";
   return index === open.length - 1 ? "orcamento" : "conversando";
 }
-/** Etapa do funil para uma categoria antiga (migração e movimentos feitos pela versão anterior). */
+/** Categoria de uma etapa: ganho → fechado, perda → perdido, em andamento → a categoria gravada na etapa. */
+export function legacyStageFor(pipeline: Pipeline, stageId: string | null | undefined): Stage {
+  const stage = stageOf(pipeline, stageId);
+  if (!stage) return "novo";
+  if (stage.kind === "won") return "fechado";
+  if (stage.kind === "lost") return "perdido";
+  return isOpenCategory(stage.category) ? stage.category : positionalCategory(pipeline, stage.id);
+}
+/**
+ * Etapa do funil para uma categoria (migração, movimentos da versão anterior e transferência entre funis): a primeira
+ * etapa com essa categoria; se o funil não tiver nenhuma, a mais avançada que não passa dela; senão, a primeira.
+ */
 export function stageIdForLegacy(pipeline: Pipeline, legacy: Stage): string {
   if (legacy === "fechado") return wonStage(pipeline)!.id;
   if (legacy === "perdido") return lostStage(pipeline)!.id;
   const open = openStages(pipeline);
   if (!open.length) throw new Error("Funil sem etapa em andamento");
-  if (legacy === "novo") return open[0]!.id;
-  if (legacy === "orcamento") return open[open.length - 1]!.id;
-  return open[Math.min(1, open.length - 1)]!.id;
+  const exact = open.find((stage) => legacyStageFor(pipeline, stage.id) === legacy);
+  if (exact) return exact.id;
+  const target = categoryRank(legacy);
+  const before = open.filter((stage) => categoryRank(legacyStageFor(pipeline, stage.id)) <= target);
+  return (before.at(-1) ?? open[0])!.id;
+}
+/** Completa a categoria de etapas que vieram sem ela (gravadas antes de a categoria existir), pela posição de então. */
+export function withCategories(pipeline: Pipeline): Pipeline {
+  const fixed = (stage: PipelineStage): Stage =>
+    stage.kind === "won" ? "fechado" : stage.kind === "lost" ? "perdido" : isOpenCategory(stage.category) ? stage.category : positionalCategory(pipeline, stage.id);
+  if (pipeline.stages.every((stage) => stage.category === fixed(stage))) return pipeline;
+  return { ...pipeline, stages: pipeline.stages.map((stage) => ({ ...stage, category: fixed(stage) })) };
 }
 
 export const clampProbability = (value: unknown) => {
@@ -138,8 +177,11 @@ export const cleanLabel = (value: unknown, max = 40) =>
     .slice(0, max);
 
 export type StageDraft = { [K in keyof StageTemplate]?: StageTemplate[K] | null | undefined };
-/** Normaliza uma etapa vinda da tela. O tipo (andamento/ganho/perdido) é preservado por quem chama. */
-export function normalizeStage(input: StageDraft, kind: StageKind): StageTemplate {
+/**
+ * Normaliza uma etapa vinda da tela. O tipo (andamento/ganho/perdido) é preservado por quem chama. Categoria: ganho e
+ * perda são fixas; em andamento usa a escolhida, senão `fallback` (a que a etapa já tinha, ou "conversando" se nova).
+ */
+export function normalizeStage(input: StageDraft, kind: StageKind, fallback: Stage = "conversando"): StageTemplate {
   const label = cleanLabel(input.label);
   if (!label) throw new Error("Dê um nome à etapa");
   const color = STAGE_COLORS.includes(input.color as StageColor) ? (input.color as StageColor) : "muted";
@@ -148,6 +190,8 @@ export function normalizeStage(input: StageDraft, kind: StageKind): StageTemplat
     label,
     color,
     kind,
+    category:
+      kind === "won" ? "fechado" : kind === "lost" ? "perdido" : isOpenCategory(input.category) ? input.category : isOpenCategory(fallback) ? fallback : "conversando",
     probability: kind === "won" ? 100 : kind === "lost" ? 0 : clampProbability(input.probability),
     wipLimit: kind === "open" ? positiveIntOrNull(input.wipLimit) : null,
     staleDays: kind === "open" ? positiveIntOrNull(input.staleDays) : null,

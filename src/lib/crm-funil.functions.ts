@@ -86,6 +86,7 @@ export const saveStages = createServerFn({ method: "POST" })
                 label: z.string().trim().min(1).max(40),
                 color,
                 kind: z.enum(["open", "won", "lost"]).optional(),
+                category: z.enum(["novo", "conversando", "orcamento", "fechado", "perdido"]).optional(),
                 probability: z.number().int().min(0).max(100).optional(),
                 wipLimit: optionalInt,
                 staleDays: optionalInt,

@@ -17,9 +17,12 @@ import {
   setPipelineAccess,
   updatePipeline,
 } from "@/lib/crm-funil.functions";
+import type { Stage } from "@/lib/crm";
 import {
+  CATEGORY_LABEL,
   KIND_LABEL,
   MAX_STAGES,
+  OPEN_CATEGORIES,
   REQUIRED_FIELDS,
   REQUIRED_FIELD_LABEL,
   SCOPES,
@@ -51,6 +54,7 @@ interface Draft {
   label: string;
   color: StageColor;
   kind: StageKind;
+  category: Stage;
   probability: number;
   wipLimit: string;
   staleDays: string;
@@ -64,6 +68,7 @@ const toDrafts = (pipeline: Pipeline): Draft[] =>
     label: stage.label,
     color: stage.color,
     kind: stage.kind,
+    category: stage.category,
     probability: stage.probability,
     wipLimit: stage.wipLimit === null ? "" : String(stage.wipLimit),
     staleDays: stage.staleDays === null ? "" : String(stage.staleDays),
@@ -287,6 +292,7 @@ function PipelineEditor({
       label: string;
       color: StageColor;
       kind?: StageKind;
+      category?: Stage;
       probability?: number;
       wipLimit?: number | null;
       staleDays?: number | null;
@@ -372,11 +378,17 @@ function PipelineEditor({
           <h3 className="text-sm font-semibold">Etapas</h3>
           <span className="text-xs text-muted-foreground">Ganho e perda ficam sempre no fim e não podem ser excluídas.</span>
         </div>
+        <p className="text-xs text-muted-foreground">
+          A <strong>categoria</strong> de cada etapa é fixa: é o que automações, relatórios e a versão anterior do sistema
+          enxergam. Mudar a ordem, incluir ou excluir etapas não muda a categoria de nenhum negócio.
+        </p>
         <ol className="space-y-2">
           {[...open, ...closed].map((item, index) => {
             const deals = item.id ? (pipeline.counts[item.id] ?? 0) : 0;
             const isOpen = item.kind === "open";
             const openIndex = open.findIndex((draft) => draft.key === item.key);
+            const savedCategory = item.id ? pipeline.stages.find((stage) => stage.id === item.id)?.category : undefined;
+            const categoryChanged = Boolean(savedCategory && savedCategory !== item.category);
             return (
               <li key={item.key} className="grid gap-2 rounded-lg border bg-surface p-3 md:grid-cols-[auto_minmax(0,1fr)] md:items-start">
                 <div className="flex items-center gap-1 md:flex-col">
@@ -388,10 +400,11 @@ function PipelineEditor({
                   </Button>
                   <span className="text-xs text-muted-foreground md:hidden">{index + 1}</span>
                 </div>
-                <div className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(0,1.4fr)_8rem_6rem_6rem_6rem]">
+                <div className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(0,1.4fr)_9.5rem_5.5rem_5.5rem_6rem]">
                   <p className="text-xs font-medium text-muted-foreground sm:col-span-2 xl:col-span-5">
                     {KIND_LABEL[item.kind]}
                     {deals > 0 ? ` · ${deals} negócio(s)` : " · sem negócios"}
+                    {!isOpen && ` · categoria ${CATEGORY_LABEL[item.category]}`}
                   </p>
                   <div className="space-y-1 sm:col-span-2 xl:col-span-1">
                     <Label className="text-xs">Nome</Label>
@@ -422,6 +435,34 @@ function PipelineEditor({
                     <Label className="text-xs">Parado (dias)</Label>
                     <Input aria-label="Dias até ficar parado" type="number" min={1} placeholder="—" value={item.staleDays} disabled={busy || !isOpen} onChange={(event) => patch(item.key, { staleDays: event.target.value })} className="h-11 sm:h-9" />
                   </div>
+                  {isOpen && (
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 sm:col-span-2 xl:col-span-5">
+                      <Label className="text-xs" htmlFor={`categoria-${item.key}`}>
+                        Categoria
+                      </Label>
+                      <select
+                        id={`categoria-${item.key}`}
+                        aria-label="Categoria da etapa"
+                        value={item.category}
+                        disabled={busy}
+                        onChange={(event) => patch(item.key, { category: event.target.value as Stage })}
+                        className={selectClass}
+                      >
+                        {OPEN_CATEGORIES.map((category) => (
+                          <option key={category} value={category}>
+                            {CATEGORY_LABEL[category]}
+                          </option>
+                        ))}
+                      </select>
+                      {categoryChanged && deals > 0 ? (
+                        <span className="text-xs font-medium text-[var(--crm-warning)]">
+                          Ao salvar, os {deals} negócio(s) desta etapa passam para a categoria “{CATEGORY_LABEL[item.category]}”.
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">não muda ao reordenar</span>
+                      )}
+                    </div>
+                  )}
                   {item.kind !== "lost" && (
                     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 sm:col-span-2 xl:col-span-5">
                       <span className="text-xs text-muted-foreground">Exigir para entrar:</span>
@@ -496,6 +537,7 @@ function PipelineEditor({
                   label: "Nova etapa",
                   color: "info",
                   kind: "open",
+                  category: open.at(-1)?.category ?? "conversando",
                   probability: 50,
                   wipLimit: "",
                   staleDays: "",
@@ -520,6 +562,7 @@ function PipelineEditor({
                   label: item.label.trim(),
                   color: item.color,
                   kind: item.kind,
+                  category: item.category,
                   probability: Math.min(100, Math.max(0, Math.round(item.probability || 0))),
                   wipLimit: intOrNull(item.wipLimit),
                   staleDays: intOrNull(item.staleDays),

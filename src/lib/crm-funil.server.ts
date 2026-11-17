@@ -17,14 +17,13 @@ import {
   VENDAS_STAGES,
   cleanLabel,
   legacyStageFor,
-  lostStage,
   normalizeStage,
   openStages,
   pipelineShapeErrors,
   sortStages,
   stageIdForLegacy,
   stageOf,
-  wonStage,
+  withCategories,
   type Pipeline,
   type PipelineScope,
   type PipelineSeller,
@@ -83,7 +82,7 @@ export function ensureFunilSchema(db: Db = getDb()): Db {
         color TEXT NOT NULL DEFAULT 'muted', kind TEXT NOT NULL CHECK(kind IN ('open','won','lost')),
         position INTEGER NOT NULL, probability INTEGER NOT NULL DEFAULT 0 CHECK(probability BETWEEN 0 AND 100),
         wip_limit INTEGER, stale_days INTEGER, required_fields TEXT NOT NULL DEFAULT '[]', archived_at TEXT,
-        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, category TEXT
       );
       CREATE INDEX IF NOT EXISTS crm_pipeline_stages_pipeline ON crm_pipeline_stages(pipeline_id, position);
       CREATE TABLE IF NOT EXISTS crm_pipeline_access (
@@ -107,6 +106,12 @@ export function ensureFunilSchema(db: Db = getDb()): Db {
     ] as const)
       if (!columns.has(name)) db.exec(`ALTER TABLE crm_opportunities ADD COLUMN ${name} ${type}`);
     db.exec("CREATE INDEX IF NOT EXISTS crm_opportunities_pipeline ON crm_opportunities(pipeline_id, stage_id, position)");
+    // Etapas gravadas antes de a categoria existir (só a homologação de 17/11): ganham a coluna e a categoria uma vez.
+    const stageColumns = new Set(
+      (db.prepare("PRAGMA table_info(crm_pipeline_stages)").all() as Row[]).map((column) => str(column["name"])),
+    );
+    if (!stageColumns.has("category")) db.exec("ALTER TABLE crm_pipeline_stages ADD COLUMN category TEXT");
+    backfillStageCategories(db);
     schemaReady.add(db);
   }
   if (!migrated.has(db)) {
@@ -129,6 +134,8 @@ function stageFromRow(row: Row): PipelineStage {
     label: str(row["label"]),
     color: str(row["color"]) as StageColor,
     kind: str(row["kind"]) as StageKind,
+    // Vazia só em etapa gravada antes da categoria existir: loadPipelines completa (withCategories).
+    category: str(row["category"]) as Stage,
     position: Number(row["position"]),
     probability: Number(row["probability"]),
     wipLimit: row["wip_limit"] == null ? null : Number(row["wip_limit"]),
@@ -150,14 +157,36 @@ export function loadPipelines(db: Db = getDb()): Pipeline[] {
     db
       .prepare("SELECT * FROM crm_pipelines WHERE archived_at IS NULL ORDER BY is_default DESC, position, created_at, id")
       .all() as Row[]
-  ).map((row) => ({
-    id: str(row["id"]),
-    name: str(row["name"]),
-    scope: str(row["scope"]) as PipelineScope,
-    isDefault: Boolean(row["is_default"]),
-    revision: Number(row["revision"]),
-    stages: sortStages(stages.get(str(row["id"])) ?? []),
-  }));
+  ).map((row) =>
+    withCategories({
+      id: str(row["id"]),
+      name: str(row["name"]),
+      scope: str(row["scope"]) as PipelineScope,
+      isDefault: Boolean(row["is_default"]),
+      revision: Number(row["revision"]),
+      stages: sortStages(stages.get(str(row["id"])) ?? []),
+    }),
+  );
+}
+/**
+ * Grava a categoria das etapas que ainda não têm (gravadas antes de ela existir), pela posição que valia então: a
+ * categoria de nenhum negócio muda. Idempotente; depois disso a posição não decide mais nada.
+ */
+export function backfillStageCategories(db: Db = getDb()) {
+  if (!db.prepare("SELECT 1 FROM crm_pipeline_stages WHERE category IS NULL OR category='' LIMIT 1").get()) return 0;
+  const update = db.prepare("UPDATE crm_pipeline_stages SET category=? WHERE id=? AND (category IS NULL OR category='')");
+  let changed = 0;
+  for (const pipeline of loadPipelines(db))
+    for (const stage of pipeline.stages) changed += Number(update.run(stage.category, stage.id).changes);
+  // Etapas de funis ou etapas já arquivados não aparecem em loadPipelines: categoria pelo tipo (não têm negócios).
+  changed += Number(
+    db
+      .prepare(
+        "UPDATE crm_pipeline_stages SET category=CASE kind WHEN 'won' THEN 'fechado' WHEN 'lost' THEN 'perdido' ELSE 'conversando' END WHERE category IS NULL OR category=''",
+      )
+      .run().changes,
+  );
+  return changed;
 }
 function systemDefault(pipelines: Pipeline[]): Pipeline {
   const found = pipelines.find((pipeline) => pipeline.isDefault) ?? pipelines[0];
@@ -335,7 +364,7 @@ function insertPipeline(
   stages.forEach((stage, index) =>
     db
       .prepare(
-        "INSERT INTO crm_pipeline_stages(id,pipeline_id,label,color,kind,position,probability,wip_limit,stale_days,required_fields,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO crm_pipeline_stages(id,pipeline_id,label,color,kind,category,position,probability,wip_limit,stale_days,required_fields,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
       )
       .run(
         randomUUID(),
@@ -343,6 +372,7 @@ function insertPipeline(
         stage.label,
         stage.color,
         stage.kind,
+        stage.kind === "won" ? "fechado" : stage.kind === "lost" ? "perdido" : stage.category,
         index,
         stage.probability,
         stage.wipLimit,
@@ -425,7 +455,11 @@ function requirePipeline(db: Db, id: string, revision?: number): Pipeline {
 function bumpPipeline(db: Db, id: string, actorId: string) {
   db.prepare("UPDATE crm_pipelines SET revision=revision+1,updated_at=?,updated_by=? WHERE id=?").run(now(), actorId, id);
 }
-/** Recalcula a categoria (coluna antiga) dos negócios do funil depois de mudar ordem ou etapas. */
+/**
+ * Mantém a coluna antiga `stage` igual à categoria da etapa de cada negócio. Com a categoria fixa por etapa, incluir,
+ * reordenar ou excluir etapas não muda nada aqui; só a troca explícita da categoria de uma etapa (pelo administrador)
+ * ou um negócio levado para outra etapa mudam a categoria.
+ */
 function syncLegacy(db: Db, pipeline: Pipeline) {
   const rows = db.prepare("SELECT id,stage,stage_id FROM crm_opportunities WHERE pipeline_id=?").all(pipeline.id) as Row[];
   for (const row of rows) {
@@ -434,11 +468,13 @@ function syncLegacy(db: Db, pipeline: Pipeline) {
       db.prepare("UPDATE crm_opportunities SET stage=?,revision=revision+1,updated_at=? WHERE id=?").run(legacy, now(), row["id"]);
   }
 }
-/** Move negócios entre funis mantendo o tipo da etapa (andamento → primeira etapa; ganho → ganho; perda → perda). */
+/**
+ * Move negócios entre funis mantendo a categoria: ganho → ganho, perda → perda, em andamento → a etapa do destino com a
+ * mesma categoria (se o destino não tiver, a mais avançada que não passa dela).
+ */
 function transferDeals(db: Db, rows: Row[], from: Pipeline, to: Pipeline, actorId: string, reason: string) {
   for (const row of rows) {
-    const kind = stageOf(from, str(row["stage_id"]))?.kind ?? "open";
-    const target = kind === "won" ? wonStage(to)! : kind === "lost" ? lostStage(to)! : openStages(to)[0]!;
+    const target = stageOf(to, stageIdForLegacy(to, legacyStageFor(from, str(row["stage_id"]))))!;
     db.prepare(
       "UPDATE crm_opportunities SET pipeline_id=?,stage_id=?,stage=?,stage_entered_at=?,position=?,loss_reason=CASE WHEN ?='lost' THEN loss_reason ELSE NULL END,revision=revision+1,updated_at=? WHERE id=?",
     ).run(
@@ -571,14 +607,17 @@ export interface StageInput {
   label: string;
   color: StageColor;
   kind?: StageKind | undefined;
+  /** Categoria da etapa em andamento (novo, conversando ou orçamento). Sem ela, a etapa mantém a que já tinha. */
+  category?: Stage | undefined;
   probability?: number | undefined;
   wipLimit?: number | null | undefined;
   staleDays?: number | null | undefined;
   requiredFields?: RequiredField[] | undefined;
 }
 /**
- * Salva a estrutura de etapas de uma vez (nome, cor, ordem, chance, limite, dias parado, obrigatórios). Etapa que sai
- * da lista com negócios exige destino em `moves`; ganho e perda não podem sair. Etapas novas são sempre "em andamento".
+ * Salva a estrutura de etapas de uma vez (nome, cor, categoria, ordem, chance, limite, dias parado, obrigatórios). Etapa
+ * que sai da lista com negócios exige destino em `moves`; ganho e perda não podem sair. Etapas novas são sempre "em
+ * andamento". A ordem nunca muda categoria; trocar a categoria de uma etapa leva junto a dos negócios dela (auditado).
  */
 export function saveStages(
   actor: SiteUser,
@@ -595,11 +634,16 @@ export function saveStages(
       if (!old) throw new Error("Etapa não pertence a este funil");
       if (seen.has(item.id)) throw new Error("Etapa repetida");
       seen.add(item.id);
-      return { id: item.id, ...normalizeStage(item, old.kind) };
+      return { id: item.id, ...normalizeStage(item, old.kind, old.category) };
     }
     if (item.kind && item.kind !== "open") throw new Error("Só é possível acrescentar etapas em andamento");
-    return { id: "", ...normalizeStage(item, "open") };
+    return { id: "", ...normalizeStage(item, "open", "conversando") };
   });
+  const dealsIn = (stageId: string) =>
+    Number(db.prepare("SELECT count(*) n FROM crm_opportunities WHERE pipeline_id=? AND stage_id=?").get(pipeline.id, stageId)?.["n"]);
+  const categoryChanges = next
+    .filter((stage) => stage.id && stage.kind === "open" && existing.get(stage.id)!.category !== stage.category)
+    .map((stage) => ({ etapa: stage.label, de: existing.get(stage.id)!.category, para: stage.category, negocios: dealsIn(stage.id) }));
   const errors = pipelineShapeErrors(next);
   if (errors.length) throw new Error(errors[0]);
   const removed = pipeline.stages.filter((stage) => !seen.has(stage.id));
@@ -619,13 +663,13 @@ export function saveStages(
     ordered.forEach((stage, index) => {
       if (stage.id)
         db.prepare(
-          "UPDATE crm_pipeline_stages SET label=?,color=?,position=?,probability=?,wip_limit=?,stale_days=?,required_fields=?,updated_at=? WHERE id=?",
-        ).run(stage.label, stage.color, index, stage.probability, stage.wipLimit, stage.staleDays, JSON.stringify(stage.requiredFields), at, stage.id);
+          "UPDATE crm_pipeline_stages SET label=?,color=?,category=?,position=?,probability=?,wip_limit=?,stale_days=?,required_fields=?,updated_at=? WHERE id=?",
+        ).run(stage.label, stage.color, stage.category, index, stage.probability, stage.wipLimit, stage.staleDays, JSON.stringify(stage.requiredFields), at, stage.id);
       else {
         stage.id = randomUUID();
         db.prepare(
-          "INSERT INTO crm_pipeline_stages(id,pipeline_id,label,color,kind,position,probability,wip_limit,stale_days,required_fields,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        ).run(stage.id, pipeline.id, stage.label, stage.color, "open", index, stage.probability, stage.wipLimit, stage.staleDays, JSON.stringify(stage.requiredFields), at, at);
+          "INSERT INTO crm_pipeline_stages(id,pipeline_id,label,color,kind,category,position,probability,wip_limit,stale_days,required_fields,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ).run(stage.id, pipeline.id, stage.label, stage.color, "open", stage.category, index, stage.probability, stage.wipLimit, stage.staleDays, JSON.stringify(stage.requiredFields), at, at);
       }
     });
     const updated = requirePipeline(db, pipeline.id);
@@ -650,7 +694,15 @@ export function saveStages(
     const final = requirePipeline(db, pipeline.id);
     syncLegacy(db, final);
     bumpPipeline(db, pipeline.id, actor.id);
-    audit(actor.id, "crm:funil:etapas", pipeline.id, { etapas: ordered.length, excluidas: removed.length, movidos: moved });
+    audit(actor.id, "crm:funil:etapas", pipeline.id, {
+      etapas: ordered.length,
+      excluidas: removed.length,
+      movidos: moved,
+      // Troca explícita de categoria: etapa, de → para e quantos negócios acompanharam (o audit só guarda texto curto).
+      categorias: categoryChanges.length
+        ? categoryChanges.map((item) => `${item.etapa}: ${item.de} → ${item.para} (${item.negocios} negócio(s))`).join("; ").slice(0, 500)
+        : null,
+    });
     return { pipeline: requirePipeline(db, pipeline.id), moved };
   });
 }

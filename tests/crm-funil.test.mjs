@@ -139,7 +139,7 @@ test("carteira e funis liberados no servidor: funil compartilhado não abre neg�
   assert.throws(() => move(a, o.conversando, licNovo.id, { pipelineId: lic.id }), /Forbidden: o responsável/);
   const moved = move(b, o.deB, stageNamed(lic, "Em negociação").id, { pipelineId: lic.id });
   assert.equal(moved.pipelineId, lic.id);
-  assert.equal(opp(o.deB).stage, "orcamento", "última etapa aberta = categoria orçamento");
+  assert.equal(opp(o.deB).stage, "conversando", "a categoria vem da etapa (Em negociação = conversando), não da posição");
   const log = sql().prepare("SELECT label FROM crm_activities WHERE opportunity_id=? AND kind='stage:changed' ORDER BY created_at DESC LIMIT 1").get(o.deB).label;
   assert.equal(log, "Vendas · Conversando → Licitações · Em negociação");
   assert.ok(sql().prepare("SELECT 1 FROM audit_log WHERE action='crm:funil:movimento' AND target_id=? AND actor_id=?").get(o.deB, b.id));
@@ -210,12 +210,17 @@ test("estrutura: incluir, reordenar e excluir etapa sem perder negócio", () => 
   assert.equal(rules.legacyStageFor(vendas, stageNamed(vendas, "Visita técnica").id), "conversando");
   assert.equal(opp(o.orcamento).stage, "orcamento");
 
-  // Orçamento antes da visita: a categoria acompanha a posição e é regravada nos negócios.
+  // Orçamento antes da visita: a ordem muda; a categoria das etapas e dos negócios, não.
   const e = editable(vendas);
+  const negocios = () => sql().prepare("SELECT id,stage,stage_id,revision,updated_at FROM crm_opportunities ORDER BY id").all();
+  const antes = negocios();
   funil.saveStages(admin, { pipelineId: vendas.id, revision: vendas.revision, stages: [e[0], e[1], e[3], e[2], e[4], e[5]] });
   vendas = byName("Vendas");
-  assert.equal(opp(o.orcamento).stage, "conversando");
-  assert.equal(opp(o.orcamento).stage_id, stageNamed(vendas, "Orçamento enviado").id, "a etapa do negócio não muda");
+  assert.deepEqual(vendas.stages.map((s) => s.label), ["Novo", "Conversando", "Orçamento enviado", "Visita técnica", "Fechado", "Não fechou"]);
+  assert.equal(rules.legacyStageFor(vendas, stageNamed(vendas, "Orçamento enviado").id), "orcamento");
+  assert.equal(rules.legacyStageFor(vendas, stageNamed(vendas, "Visita técnica").id), "conversando");
+  assert.deepEqual(negocios(), antes, "reordenar não muda categoria, etapa, versão nem data de nenhum negócio");
+  assert.equal(opp(o.orcamento).stage, "orcamento");
 
   const conversando = stageNamed(vendas, "Conversando");
   const without = (label) => editable(vendas).filter((s) => s.label !== label);
@@ -255,7 +260,8 @@ test("acessos: funil individual, retirar acesso com negócios, funil padrão e a
   const kept = opp(o.deB);
   funil.setPipelineAccess(admin, { pipelineId: lic.id, userId: b.id, allowed: false, targetPipelineId: vendas.id });
   assert.equal(opp(o.deB).pipeline_id, vendas.id);
-  assert.equal(opp(o.deB).stage_id, rules.openStages(byName("Vendas"))[0].id, "negócio aberto vai para a primeira etapa do destino");
+  assert.equal(opp(o.deB).stage_id, rules.stageIdForLegacy(byName("Vendas"), "conversando"), "negócio aberto vai para a etapa de mesma categoria no destino");
+  assert.equal(opp(o.deB).stage, "conversando", "a categoria do negócio não muda na transferência");
   assert.equal(opp(o.deB).owner_id, kept.owner_id);
   assert.deepEqual(funil.allowedPipelineIds(sql(), b.id), [vendas.id]);
   assert.throws(() => funil.setPipelineAccess(admin, { pipelineId: vendas.id, userId: b.id, allowed: false }), /ao menos um funil/);
@@ -276,6 +282,91 @@ test("acessos: funil individual, retirar acesso com negócios, funil padrão e a
   assert.equal(funil.defaultPipelineIdOf(sql(), a.id), vendas.id, "padrão corrigido para o destino");
   const last = byName("Vendas");
   assert.throws(() => funil.archivePipeline(admin, { id: last.id, revision: last.revision, targetPipelineId: last.id }), /último funil/);
+});
+
+test("categoria fixa por etapa: etapas novas e ordem invertida não mudam ninguém; troca explícita leva os negócios, com auditoria", () => {
+  let vendas = byName("Vendas");
+  const negocios = () => sql().prepare("SELECT id,stage,stage_id,revision,updated_at FROM crm_opportunities ORDER BY id").all();
+  const categorias = () => Object.fromEntries(byName("Vendas").stages.map((s) => [s.label, s.category]));
+  const antes = negocios();
+  const catAntes = categorias();
+  const e = editable(vendas);
+  const open = e.filter((s) => s.kind === "open");
+  const closed = e.filter((s) => s.kind !== "open");
+  const triagem = { label: "Triagem", color: "info", category: "novo", probability: 5, wipLimit: null, staleDays: null, requiredFields: [] };
+  const fim = { label: "Negociação final", color: "primary", category: "orcamento", probability: 80, wipLimit: null, staleDays: null, requiredFields: [] };
+  funil.saveStages(admin, { pipelineId: vendas.id, revision: vendas.revision, stages: [triagem, ...[...open].reverse(), fim, ...closed] });
+  assert.deepEqual(negocios(), antes, "etapa nova no início e no fim + ordem invertida: nenhum negócio muda");
+  for (const [label, category] of Object.entries(catAntes)) assert.equal(categorias()[label], category, `${label} mantém a categoria`);
+  assert.equal(categorias()["Triagem"], "novo");
+  assert.equal(categorias()["Negociação final"], "orcamento");
+
+  vendas = byName("Vendas");
+  const copia = funil.createPipeline(admin, { name: "Cópia de Vendas", scope: "shared", duplicateOf: vendas.id });
+  assert.deepEqual(copia.stages.map((s) => [s.label, s.category]), vendas.stages.map((s) => [s.label, s.category]), "copiar o funil copia as categorias");
+
+  // Troca explícita (como a tela manda: todas as etapas com a categoria): os negócios da etapa acompanham.
+  const visita = stageNamed(vendas, "Visita técnica");
+  const novo = newOpp(a).id;
+  move(a, novo, visita.id);
+  const nela = sql().prepare("SELECT id FROM crm_opportunities WHERE stage_id=?").all(visita.id).map((r) => r.id);
+  const fora = negocios().filter((row) => !nela.includes(row.id));
+  const comCategoria = (stages, troca = {}) => stages.map((s) => ({ ...s, category: troca[s.label] ?? vendas.stages.find((x) => x.id === s.id).category }));
+  funil.saveStages(admin, { pipelineId: vendas.id, revision: vendas.revision, stages: comCategoria(editable(vendas), { "Visita técnica": "orcamento" }) });
+  for (const id of nela) assert.equal(opp(id).stage, "orcamento", "negócio da etapa acompanha a troca explícita");
+  assert.deepEqual(negocios().filter((row) => !nela.includes(row.id)), fora, "os outros negócios não mudam");
+  const registro = sql().prepare("SELECT details FROM audit_log WHERE action='crm:funil:etapas' AND target_id=? ORDER BY rowid DESC LIMIT 1").get(vendas.id);
+  assert.match(registro.details, new RegExp(`Visita técnica: conversando → orcamento \\(${nela.length} negócio`));
+
+  // Transferência entre funis mantém a categoria (arquivar a cópia com um negócio em "orçamento").
+  vendas = byName("Vendas");
+  funil.saveStages(admin, { pipelineId: vendas.id, revision: vendas.revision, stages: comCategoria(editable(vendas), { "Visita técnica": "conversando" }) });
+  funil.setPipelineAccess(admin, { pipelineId: copia.id, userId: a.id, allowed: true });
+  const naCopia = byName("Cópia de Vendas");
+  // A cópia herdou os obrigatórios de "Orçamento enviado" (valor e próxima ação).
+  move(a, novo, stageNamed(naCopia, "Orçamento enviado").id, {
+    pipelineId: naCopia.id,
+    fields: { estimatedValueCents: 90000, nextAction: { label: "Retornar proposta", due: "2026-11-25T12:00:00Z" } },
+  });
+  funil.archivePipeline(admin, { id: naCopia.id, revision: naCopia.revision, targetPipelineId: vendas.id });
+  vendas = byName("Vendas");
+  assert.equal(opp(novo).pipeline_id, vendas.id);
+  assert.equal(opp(novo).stage, "orcamento", "continua em orçamento depois de arquivar o funil de origem");
+  assert.equal(opp(novo).stage_id, stageNamed(vendas, "Orçamento enviado").id, "primeira etapa de categoria orçamento do destino");
+});
+
+test("etapas gravadas sem categoria (homologação de 17/11) ganham a da posição de então, uma vez, sem mudar negócio", () => {
+  funil.createPipeline(admin, { name: "Funil antigo", scope: "shared" });
+  let p = byName("Funil antigo");
+  funil.setPipelineAccess(admin, { pipelineId: p.id, userId: a.id, allowed: true });
+  const e = editable(p);
+  funil.saveStages(admin, { pipelineId: p.id, revision: p.revision, stages: [e[0], e[1], { label: "Proposta", color: "primary", probability: 70, requiredFields: [] }, e[2], e[3]] });
+  p = byName("Funil antigo");
+  const ids = ["Novo", "Em negociação", "Proposta"].map((label) => {
+    const id = newOpp(a).id;
+    move(a, id, stageNamed(p, label).id, { pipelineId: p.id });
+    return id;
+  });
+  // Como a versão de 17/11 gravava: etapa sem categoria; a categoria dos negócios vinha da posição.
+  sql().prepare("UPDATE crm_pipeline_stages SET category=NULL WHERE pipeline_id=?").run(p.id);
+  const semCategoria = funil.loadPipelines(sql()).find((x) => x.id === p.id);
+  for (const id of ids) sql().prepare("UPDATE crm_opportunities SET stage=? WHERE id=?").run(rules.positionalCategory(semCategoria, opp(id).stage_id), id);
+  const antes = ids.map((id) => [opp(id).stage_id, opp(id).stage, opp(id).revision]);
+  assert.equal(funil.backfillStageCategories(sql()), 5);
+  assert.equal(funil.backfillStageCategories(sql()), 0, "uma vez só");
+  p = byName("Funil antigo");
+  assert.deepEqual(p.stages.map((s) => [s.label, s.category]), [
+    ["Novo", "novo"], ["Em negociação", "conversando"], ["Proposta", "orcamento"], ["Ganho", "fechado"], ["Perdido", "perdido"],
+  ]);
+  funil.migrateFunis(sql());
+  assert.deepEqual(ids.map((id) => [opp(id).stage_id, opp(id).stage, opp(id).revision]), antes, "preencher e migrar de novo não muda negócio");
+  const f = editable(p);
+  funil.saveStages(admin, { pipelineId: p.id, revision: p.revision, stages: [f[2], f[1], f[0], f[3], f[4]] });
+  assert.deepEqual(ids.map((id) => opp(id).stage), ["novo", "conversando", "orcamento"], "depois de gravada, a ordem não decide mais");
+  const vendas = byName("Vendas");
+  p = byName("Funil antigo");
+  funil.archivePipeline(admin, { id: p.id, revision: p.revision, targetPipelineId: vendas.id });
+  assert.deepEqual(ids.map((id) => opp(id).stage), ["novo", "conversando", "orcamento"], "arquivar leva cada um para a mesma categoria");
 });
 
 test("negócios novos pelo WhatsApp/site e vendedor novo entram sozinhos no funil padrão", async () => {
@@ -303,8 +394,22 @@ test("regras puras: categoria, obrigatórios, indicadores e valor conhecido", ()
       { id: "l", label: "L", color: "muted", kind: "lost", position: 4, probability: 0, wipLimit: null, staleDays: null, requiredFields: [] },
     ],
   };
+  // Sem categoria gravada (formato antigo): cai na posição de então.
   assert.deepEqual(["a", "b", "c", "w", "l"].map((id) => rules.legacyStageFor(pl, id)), ["novo", "conversando", "orcamento", "fechado", "perdido"]);
   assert.deepEqual(["novo", "conversando", "orcamento", "fechado", "perdido"].map((s) => rules.stageIdForLegacy(pl, s)), ["a", "b", "c", "w", "l"]);
+  // Com categoria gravada: a posição não decide; categoria ausente no funil → a mais avançada que não passa dela.
+  const cat = (category) => ({ category });
+  const fixo = { ...pl, stages: [
+    { ...pl.stages[0], ...cat("orcamento") }, { ...pl.stages[1], ...cat("novo") }, { ...pl.stages[2], ...cat("novo") },
+    { ...pl.stages[3], ...cat("fechado") }, { ...pl.stages[4], ...cat("perdido") },
+  ] };
+  assert.deepEqual(["a", "b", "c"].map((id) => rules.legacyStageFor(fixo, id)), ["orcamento", "novo", "novo"]);
+  assert.equal(rules.stageIdForLegacy(fixo, "orcamento"), "a");
+  assert.equal(rules.stageIdForLegacy(fixo, "novo"), "b", "primeira etapa daquela categoria");
+  assert.equal(rules.stageIdForLegacy(fixo, "conversando"), "c", "sem 'conversando': a mais avançada que não passa dela");
+  assert.deepEqual(rules.withCategories(pl).stages.map((s) => s.category), ["novo", "conversando", "orcamento", "fechado", "perdido"]);
+  assert.equal(rules.normalizeStage({ label: "X", color: "info", category: "fechado" }, "open", "novo").category, "novo", "em andamento nunca vira fechado");
+  assert.equal(rules.normalizeStage({ label: "X", color: "info", category: "novo" }, "won").category, "fechado");
   assert.deepEqual(rules.missingRequired({ valueCents: 0, nextActionLabel: "", notes: " " }, pl.stages[1]), ["notes"]);
   const now = Date.parse("2026-11-20T00:00:00Z");
   const m = rules.funnelMetrics(pl, [
