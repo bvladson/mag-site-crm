@@ -1,4 +1,4 @@
-# VPS srv1851839 — reinício planejado (procedimento de manutenção)
+# VPS srv-vps — reinício planejado (procedimento de manutenção)
 
 Instalado em `/srv/mag-site/REBOOT.md`. Vale para a VPS inteira (todos os projetos), não só para o site da MAG.
 **Nenhum reinício é feito sem autorização explícita do responsável.** Preparado em 05/10/2026; não executado.
