@@ -1,3 +1,5 @@
+# Contexto técnico e regras do projeto
+
 - Product/stock reads go through `src/lib/omie.ts`; mock data lives only in `src/data/catalog.ts` — keeps the future Omie swap isolated.
 - Brand identity and general contacts live in `src/config/site.ts`; store addresses and contacts use the site's own `site_units` registry (`src/lib/units.*`). Public reads expose only active stores. Proposal issuer data remains an explicit administrative setting, independent of store selection.
 - Leads (orçamentos, candidaturas) are written only by server functions in `src/lib/leads.functions.ts` to the site's isolated SQLite database. Private reads and writes require a session and server authorization; do not introduce a second Supabase/Lovable database.

@@ -449,6 +449,6 @@ Fontes principais do código:
 
 Evidências de produção: tag/saúde dos containers, agregados SQL em leitura, booleans de configuração do ambiente em execução, catálogo/status/índice, agendas do host, pacote de backup e respostas HTTP. Não foram extraídas linhas pessoais ou credenciais para o relatório.
 
-Documentos locais como `AGENTS.md`, `roadmap.md` e partes de `DEPLOY-VPS.md` contêm trechos legados. Quando há divergência, este diagnóstico se baseia na implementação e no estado verificado da release ativa. Não interpretar dependência `supabase` ou pasta `supabase/` como prova de que esse serviço gerencia os dados atuais.
+Documentos locais como `ARQUITETURA.md`, `roadmap.md` e partes de `DEPLOY-VPS.md` contêm trechos legados. Quando há divergência, este diagnóstico se baseia na implementação e no estado verificado da release ativa. Não interpretar dependência `supabase` ou pasta `supabase/` como prova de que esse serviço gerencia os dados atuais.
 
 Notas detalhadas de leitura e exemplos dos contratos estão entregues como anexos técnicos. As funcionalidades novas discutidas neste documento permanecem propostas: o relatório não executou uma nova implementação ou publicação.

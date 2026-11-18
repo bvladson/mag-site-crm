@@ -131,7 +131,7 @@ Recursos propostos na conversa, **ainda não implementados nesta base**: carross
 
 Preservar os contratos reais dos módulos e construir o visual em cima deles. Uma boa evolução reúne: cadastro global único de unidades; diretório público de vendedores com aprovação admin separado de contas de acesso; CMS institucional e editorial de produto; campanhas/banners como entidade própria com rascunho/prévia/publicação e agendamento; catálogo de ofertas com validação comercial; atribuição de campanha até o lead; relatório de cliques sem registrar conversas privadas. Essas são recomendações futuras, não descrição de funcionalidade existente.
 
-Não mover credenciais Omie para o navegador, não substituir a integração por dados mock em produção e não interpretar o arquivo AGENTS.md como prova de Supabase ativo: ele contém instrução legada de Supabase/RLS para leads, enquanto `leads.functions.ts` grava no banco local próprio do site. A implementação e a opção expressa do usuário por banco próprio são as fontes atuais.
+Não mover credenciais Omie para o navegador, não substituir a integração por dados mock em produção e não interpretar o arquivo ARQUITETURA.md como prova de Supabase ativo: ele contém instrução legada de Supabase/RLS para leads, enquanto `leads.functions.ts` grava no banco local próprio do site. A implementação e a opção expressa do usuário por banco próprio são as fontes atuais.
 
 ## 9. Conferências de estado a fazer na VPS para o consolidado
 

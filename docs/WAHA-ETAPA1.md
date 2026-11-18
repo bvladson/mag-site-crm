@@ -96,7 +96,7 @@ O inventário exato, incluindo tipo de alteração e hashes antes/depois em comp
 | Interface existente | `src/components/interno/crm/CrmInbox.tsx`, `CrmIntegrations.tsx`, `CrmProvider.tsx`, novos `WahaSettings.tsx` e `MessageMedia.tsx` |
 | Docker e recuperação | `deploy/waha/compose.yaml`, `mag-site.override.yaml`, `prepare.py`, `backup.sh`, `restore.py`, `README.md`; `deploy/srv/backup.sh` e `restore.sh` |
 | Testes | `tests/waha-store.test.mjs`, `tests/waha-transport.test.mjs` |
-| Orientação e documentação | `AGENTS.md`, `docs/CRM-MAG.md`, este relatório e `docs/WAHA-REVISAO-ETAPA1.md` |
+| Orientação e documentação | `ARQUITETURA.md`, `docs/CRM-MAG.md`, este relatório e `docs/WAHA-REVISAO-ETAPA1.md` |
 
 Evidências locais em `C:\Users\VLADSON\Downloads\MAG-WAHA-ETAPA1-20261106`:
 
