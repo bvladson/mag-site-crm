@@ -1,6 +1,6 @@
 # Deploy na VPS (Node + Docker)
 
-Publicado em 02/10/2026 em https://magmoveiscorporativos.com.br (VPS 179.197.238.57).
+Publicado em 02/10/2026 em https://magmoveiscorporativos.com.br (VPS 203.0.113.10).
 Referência completa da instalação: `deploy/srv/MANIFESTO.md` (cópia viva em `/srv/mag-site/MANIFESTO.md`).
 
 ## Como o site roda
@@ -29,7 +29,7 @@ Referência completa da instalação: `deploy/srv/MANIFESTO.md` (cópia viva em 
 
     # no computador: empacotar sem node_modules/.output/.env
     tar --exclude=./node_modules --exclude=./.output --exclude=./.env -czf release-<tag>.tar.gz -C "SITE MAGMOVEIS INSTITUCIONAL" .
-    scp release-<tag>.tar.gz root@179.197.238.57:/opt/mag-site/releases/
+    scp release-<tag>.tar.gz root@203.0.113.10:/opt/mag-site/releases/
     # na VPS
     mkdir /opt/mag-site/releases/<tag> && tar -xzf /opt/mag-site/releases/release-<tag>.tar.gz -C /opt/mag-site/releases/<tag>
     /opt/mag-site/bin/deploy.sh <tag>    # constrói, troca e confere a saúde; volta sozinho se falhar

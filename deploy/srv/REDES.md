@@ -36,7 +36,7 @@ conferir, o site não publica o conteúdo daquela rede (continua só o link).
 1. https://console.cloud.google.com → criar (ou escolher) um projeto, por exemplo "MAG Site".
 2. **APIs e serviços → Biblioteca** → "YouTube Data API v3" → **Ativar**.
 3. **APIs e serviços → Credenciais → Criar credenciais → Chave de API**.
-4. Editar a chave: **Restrições de aplicativo → Endereços IP** → `179.197.238.57` (saída da VPS); **Restrições de
+4. Editar a chave: **Restrições de aplicativo → Endereços IP** → `203.0.113.10` (saída da VPS); **Restrições de
    API → Restringir chave → YouTube Data API v3** → Salvar. Assim a chave não serve em nenhum outro lugar.
 5. **ID do canal** (o ID não aparece no endereço `@magmoveiscorporativos7222` e não é deduzido): duas formas oficiais —
    (a) no YouTube, logado na conta do canal: foto do perfil → **Configurações → Configurações avançadas** → "ID do canal"

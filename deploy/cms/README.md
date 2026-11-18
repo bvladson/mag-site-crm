@@ -1,7 +1,7 @@
 # mag-cms — WordPress editorial (headless) — PREPARADO, NÃO INSTALADO
 
 Situação em 05/10/2026: `cms.magmoveiscorporativos.com.br` **não resolve** (sem registro DNS). Pela regra combinada,
-nada é instalado até o DNS apontar para `179.197.238.57`. Estes arquivos são o modelo da instalação.
+nada é instalado até o DNS apontar para `203.0.113.10`. Estes arquivos são o modelo da instalação.
 
 ## Princípios
 
@@ -27,7 +27,7 @@ nada é instalado até o DNS apontar para `179.197.238.57`. Estes arquivos são 
 
 ## Instalação (somente quando o DNS estiver pronto)
 
-    getent hosts cms.magmoveiscorporativos.com.br        # tem que mostrar 179.197.238.57
+    getent hosts cms.magmoveiscorporativos.com.br        # tem que mostrar 203.0.113.10
     install -d -m 750 /opt/mag-cms && install -d -m 700 /opt/mag-cms/secrets /opt/mag-cms/db
     install -d -m 755 /opt/mag-cms/wordpress /srv/mag-cms /srv/mag-cms/backups
     # senhas novas, geradas aqui e guardadas só em /opt/mag-cms/secrets (600)
