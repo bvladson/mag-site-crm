@@ -88,3 +88,11 @@ bun run dev
 ```
 
 Testes: `bun run test`. Verificação completa antes de publicar: `npm run check:publish`.
+
+---
+
+## Autoria
+
+Projeto meu — concepção, arquitetura, implementação, implantação e operação em produção.
+Durante o desenvolvimento usei assistentes de IA (Codex e Claude) como ferramenta de apoio;
+a condução e as decisões técnicas são minhas.
